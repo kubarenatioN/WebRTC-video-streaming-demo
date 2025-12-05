@@ -210,7 +210,17 @@
       </div>
     </div>
 
+    <!-- WebRTC adapter for browser compatibility -->
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+
     <script>
+      // Проверка загрузки webrtc-adapter
+      if (typeof adapter === 'undefined') {
+        console.warn('webrtc-adapter не загружен, возможны проблемы совместимости')
+      } else {
+        console.log('webrtc-adapter загружен, браузер:', adapter.browserDetails.browser, 'версия:', adapter.browserDetails.version)
+      }
+
       const remoteVideo = document.getElementById('remoteVideo')
       const connectBtn = document.getElementById('connectBtn')
       const disconnectBtn = document.getElementById('disconnectBtn')
@@ -326,6 +336,18 @@
           }
         }
 
+        // Обработка ошибок ICE кандидатов
+        peerConnection.onicecandidateerror = (event) => {
+          console.error('ICE candidate error:', {
+            errorCode: event.errorCode,
+            errorText: event.errorText,
+            address: event.address,
+            port: event.port,
+            url: event.url,
+            errorCodeName: event.errorCodeName,
+          })
+        }
+
         // Обработка изменения состояния соединения
         peerConnection.onconnectionstatechange = () => {
           console.log('Connection state:', peerConnection.connectionState)
@@ -414,6 +436,8 @@
             if (!response.ok) return
 
             const data = await response.json()
+            console.log(data.candidates)
+
             if (data.candidates && data.candidates.length > 0) {
               for (const candidate of data.candidates) {
                 try {
@@ -424,18 +448,13 @@
 
                   // Создаем RTCIceCandidate из объекта
                   const iceCandidate = new RTCIceCandidate({
-                    candidate: candidate.candidate,
-                    sdpMLineIndex: candidate.sdpMLineIndex,
-                    sdpMid: candidate.sdpMid,
+                    ...candidate,
                   })
 
                   await peerConnection.addIceCandidate(iceCandidate)
-                  console.log('Added server ICE candidate:', candidate.candidate.substring(0, 50))
+                  console.log('Added server ICE candidate:', candidate.candidate)
                 } catch (error) {
-                  // Игнорируем ошибки для уже добавленных кандидатов
-                  if (!error.message.includes('already been added')) {
-                    console.error('Error adding ICE candidate:', error.message)
-                  }
+                  console.error('Error adding ICE candidate:', error)
                 }
               }
             }
