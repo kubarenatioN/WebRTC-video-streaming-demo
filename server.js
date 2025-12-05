@@ -1,11 +1,12 @@
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
+import wrtc from '@roamhq/wrtc'
 import { spawn } from 'child_process'
 import express from 'express'
 import { readdirSync, statSync } from 'fs'
 import { createServer } from 'http'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { nonstandard, RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } from 'wrtc'
+const { nonstandard, RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } = wrtc
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -230,29 +231,33 @@ async function createVideoTrackFromFile(videoPath) {
         return
       }
 
+      // Фиксированное разрешение для WebRTC стриминга
+      const width = 640
+      const height = 480
+
       const videoSource = new RTCVideoSource()
       const track = videoSource.createTrack()
 
       // Используем локальный бинарник ffmpeg из npm пакета
+      // Масштабируем исходное видео до фиксированного разрешения 640x480
       const ffmpeg = spawn(ffmpegInstaller.path, [
         '-re', // Читать с реальной скоростью
         '-i',
         videoPath,
+        '-vf',
+        'scale=640:480', // Масштабирование до фиксированного разрешения
         '-f',
         'rawvideo',
         '-pix_fmt',
-        'yuv420p',
-        '-s',
-        '640x480', // Разрешение
+        'yuv420p', // Формат пикселей: YUV420p (I420)
         '-r',
         '30', // 30 FPS
         '-', // Вывод в stdout
       ])
 
-      const width = 640
-      const height = 480
-      const frameSize = (width * height * 3) / 2 // YUV420p формат
+      const frameSize = (width * height * 3) / 2 // YUV420p формат: width * height * 1.5
       let frameBuffer = Buffer.alloc(0)
+      let frameCount = 0
 
       ffmpeg.stdout.on('data', (chunk) => {
         frameBuffer = Buffer.concat([frameBuffer, chunk])
@@ -261,19 +266,35 @@ async function createVideoTrackFromFile(videoPath) {
           const frame = frameBuffer.slice(0, frameSize)
           frameBuffer = frameBuffer.slice(frameSize)
 
-          // Конвертируем YUV420p в RGB для передачи
-          // Создаем ImageData-подобный объект
           try {
-            // Для YUV420p нужно конвертировать в RGBA
-            const rgbaFrame = convertYUV420pToRGBA(frame, width, height)
+            // Проверяем размер кадра
+            if (frame.length !== frameSize) {
+              console.warn(`Frame ${frameCount} size mismatch: expected ${frameSize}, got ${frame.length}. Skipping.`)
+              continue
+            }
+
+            frameCount++
+
+            // RTCVideoSource.onFrame ожидает данные в формате I420 (YUV420p)
+            // Преобразуем Buffer в Uint8ClampedArray
+            const yuvData = new Uint8ClampedArray(frame)
+
+            // Проверяем, что размер данных правильный перед передачей
+            if (yuvData.byteLength !== frameSize) {
+              console.warn(`Uint8ClampedArray size mismatch: expected ${frameSize}, got ${yuvData.byteLength}`)
+              continue
+            }
 
             videoSource.onFrame({
               width,
               height,
-              data: rgbaFrame,
+              data: yuvData,
             })
           } catch (err) {
-            console.error('Error processing frame:', err)
+            // Логируем только первые несколько ошибок, чтобы не засорять консоль
+            if (frameCount < 5 && err.message) {
+              console.error(`Error processing frame ${frameCount}:`, err.message)
+            }
           }
         }
       })
