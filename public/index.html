@@ -397,6 +397,18 @@
         iceCandidatePollingInterval = setInterval(async () => {
           if (!connectionId || !peerConnection) return
 
+          // Проверяем состояние соединения
+          const state = peerConnection.connectionState
+          if (state === 'closed' || state === 'failed' || state === 'disconnected') {
+            stopPolling()
+            return
+          }
+
+          // Проверяем, что remote description установлен перед добавлением кандидатов
+          if (!peerConnection.remoteDescription) {
+            return
+          }
+
           try {
             const response = await fetch(`/api/connection/${connectionId}/ice-candidates`)
             if (!response.ok) return
@@ -405,10 +417,25 @@
             if (data.candidates && data.candidates.length > 0) {
               for (const candidate of data.candidates) {
                 try {
-                  await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
-                  console.log('Added server ICE candidate')
+                  // Проверяем, что кандидат не null и имеет правильный формат
+                  if (!candidate || !candidate.candidate) {
+                    continue
+                  }
+
+                  // Создаем RTCIceCandidate из объекта
+                  const iceCandidate = new RTCIceCandidate({
+                    candidate: candidate.candidate,
+                    sdpMLineIndex: candidate.sdpMLineIndex,
+                    sdpMid: candidate.sdpMid,
+                  })
+
+                  await peerConnection.addIceCandidate(iceCandidate)
+                  console.log('Added server ICE candidate:', candidate.candidate.substring(0, 50))
                 } catch (error) {
-                  console.error('Error adding ICE candidate:', error)
+                  // Игнорируем ошибки для уже добавленных кандидатов
+                  if (!error.message.includes('already been added')) {
+                    console.error('Error adding ICE candidate:', error.message)
+                  }
                 }
               }
             }

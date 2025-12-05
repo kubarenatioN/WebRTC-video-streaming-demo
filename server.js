@@ -71,8 +71,13 @@ app.post('/api/offer', async (req, res) => {
     // Обработка ICE кандидатов от сервера
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        serverIceCandidates.push(event.candidate)
-        console.log(`Server ICE candidate for ${connId}`)
+        // Сохраняем кандидат в формате, который можно сериализовать в JSON
+        serverIceCandidates.push({
+          candidate: event.candidate.candidate,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+          sdpMid: event.candidate.sdpMid,
+        })
+        console.log(`Server ICE candidate for ${connId}: ${event.candidate.candidate.substring(0, 50)}`)
       }
     }
 
