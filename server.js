@@ -82,7 +82,8 @@ app.post('/api/offer', async (req, res) => {
 
         if (candidateData.candidate && candidateData.candidate.trim() !== '') {
           serverIceCandidates.push(candidateData)
-          console.log(`Server ICE candidate for ${connId}: ${candidateData.candidate.substring(0, 60)}`)
+          console.log(`\n\nServer ICE candidate for ${connId}: ${candidateData.candidate.substring(0, 60)}`)
+          console.log(`--------------------------------`)
         }
       } else {
         // null candidate означает, что все кандидаты собраны
@@ -92,15 +93,38 @@ app.post('/api/offer', async (req, res) => {
 
     // Обработка ошибок ICE
     peerConnection.onicecandidateerror = (event) => {
-      console.error(`ICE candidate error for ${connId}:`, event)
+      const { target, ...rest } = event
+      console.error(`\n\nICE candidate error for ${connId}:`, rest)
+      console.log(`--------------------------------`)
     }
 
     // Обработка установления соединения
     peerConnection.onconnectionstatechange = () => {
       console.log(`Connection state for ${connId}:`, peerConnection.connectionState)
+      console.log(`--------------------------------`)
       if (peerConnection.connectionState === 'connected') {
+        console.log(`////////////////////////////////////////////////////////////`)
         console.log(`WebRTC connection established for ${connId}`)
+
+        // Проверяем состояние треков после подключения
+        const senders = peerConnection.getSenders()
+        console.log(`Senders count after connection: ${senders.length}`)
+        // senders.forEach((sender, i) => {
+        //   const track = sender.track
+        //   console.log(`Sender ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}`)
+        // })
+
+        // const transceivers = peerConnection.getTransceivers()
+        // console.log(`Transceivers count after connection: ${transceivers.length}`)
+        // transceivers.forEach((transceiver, i) => {
+        //   console.log(`Transceiver ${i}: direction=${transceiver.direction}, mid=${transceiver.mid}, currentDirection=${transceiver.currentDirection}`)
+        //   if (transceiver.sender && transceiver.sender.track) {
+        //     const track = transceiver.sender.track
+        //     console.log(`  Track: id=${track.id}, kind=${track.kind}, enabled=${track.enabled}, readyState=${track.readyState}`)
+        //   }
+        // })
       }
+      console.log(`////////////////////////////////////////////////////////////`)
     }
 
     // Проверяем offer от клиента перед установкой
@@ -134,26 +158,136 @@ app.post('/api/offer', async (req, res) => {
           throw new Error(`Video file not found: ${videoFile}`)
         }
 
+        console.log()
         console.log(`Creating video track after setting remote description: ${videoFile}`)
+        console.log(`================================`)
 
         // Создаем видеотрек из файла
         videoTrack = await createVideoTrackFromFile(videoPath)
 
-        // Добавляем transceiver ПОСЛЕ установки remoteDescription
-        // В состоянии "have-remote-offer" можно добавлять новые transceivers
-        const transceiver = peerConnection.addTransceiver(videoTrack, {
-          direction: 'sendonly', // Сервер отправляет видео клиенту
+        // Убеждаемся, что трек активен
+        console.log('Video track initial state:', {
+          id: videoTrack.id,
+          kind: videoTrack.kind,
+          enabled: videoTrack.enabled,
+          readyState: videoTrack.readyState,
+          muted: videoTrack.muted,
         })
-        console.log('Video transceiver added to peer connection (after remote description)')
-        console.log('Current signaling state:', peerConnection.signalingState)
-        console.log('Track ID:', videoTrack.id)
-        console.log('Track kind:', videoTrack.kind)
-        console.log('Track enabled:', videoTrack.enabled)
-        console.log('Track readyState:', videoTrack.readyState)
-        console.log('Transceiver direction:', transceiver.direction)
-        console.log('Transceiver mid:', transceiver.mid)
+
+        if (videoTrack.readyState !== 'live') {
+          console.warn(`Video track readyState is '${videoTrack.readyState}', expected 'live'`)
+        }
+        if (!videoTrack.enabled) {
+          console.warn('Video track is disabled, enabling it')
+          videoTrack.enabled = true
+        }
+
+        // Проверяем состояние трека через небольшую задержку (FFmpeg может еще не начать отправлять кадры)
+        setTimeout(() => {
+          console.log('Video track state after 1 second:', {
+            id: videoTrack.id,
+            enabled: videoTrack.enabled,
+            readyState: videoTrack.readyState,
+            muted: videoTrack.muted,
+          })
+        }, 1000)
+
+        // Добавляем обработчики событий трека для отладки
+        videoTrack.onended = () => {
+          console.log(`Video track ${videoTrack.id} ended`)
+        }
+        videoTrack.onmute = () => {
+          console.log(`Video track ${videoTrack.id} muted`)
+        }
+        videoTrack.onunmute = () => {
+          console.log(`Video track ${videoTrack.id} unmuted`)
+        }
+
+        // ВАЖНО: Используем существующий transceiver от клиента вместо создания нового
+        // Клиент уже создал transceiver с recvonly, мы должны использовать его
+        const transceivers = peerConnection.getTransceivers()
+        // console.log(`Existing transceivers count: ${transceivers.length}`)
+        // transceivers.forEach((t, i) => {
+        //   console.log(`Transceiver ${i}: direction=${t.direction}, mid=${t.mid}, receiver.track.kind=${t.receiver?.track?.kind}`)
+        // })
+
+        // Ищем существующий video transceiver от клиента (recvonly)
+        // После setRemoteDescription клиентский transceiver имеет direction='recvonly' и mid='0'
+        // У него может еще не быть receiver.track, потому что трек придет только после установки соединения
+        // Ищем по mid='0' и direction='recvonly'
+        let videoTransceiver = transceivers.find((t) => t.mid === '0')
+
+        // Если не нашли по mid, ищем по receiver.track (на случай, если трек уже есть)
+        if (!videoTransceiver) {
+          videoTransceiver = transceivers.find((t) => t.receiver && t.receiver.track && t.receiver.track.kind === 'video')
+        }
+
+        if (videoTransceiver) {
+          console.log('Found existing video transceiver from client:', {
+            direction: videoTransceiver.direction,
+            mid: videoTransceiver.mid,
+            currentDirection: videoTransceiver.currentDirection,
+            receiverTrack: videoTransceiver.receiver?.track?.kind,
+            hasSender: !!videoTransceiver.sender,
+            senderTrack: videoTransceiver.sender?.track?.kind,
+          })
+
+          // Клиент создал recvonly, но для отправки медиа сервер должен изменить направление на sendonly или sendrecv
+          // Если оставить recvonly, currentDirection станет inactive и медиа не будет передаваться
+          // Изменяем направление на sendrecv (сервер отправляет, клиент получает)
+          // videoTransceiver.direction = 'sendrecv'
+
+          // !!!:
+          videoTransceiver.direction = 'sendonly'
+          console.log('Changed transceiver direction to sendrecv for media transmission')
+
+          // Добавляем трек к существующему sender или создаем sender, если его нет
+          if (videoTransceiver.sender) {
+            // Если sender уже есть, используем replaceTrack (работает даже если трека нет)
+            console.log('Using replaceTrack on existing sender')
+            await videoTransceiver.sender.replaceTrack(videoTrack)
+          } else {
+            // Если sender нет, используем addTrack - он должен использовать существующий transceiver
+            console.log('Transceiver has no sender, using addTrack (should reuse transceiver)')
+            const sender = peerConnection.addTrack(videoTrack)
+            console.log('addTrack returned sender:', sender.id)
+          }
+
+          // Проверяем результат
+          console.log('---> Video transceiver after adding track:', {
+            direction: videoTransceiver.direction,
+            mid: videoTransceiver.mid,
+            senderTrack: videoTransceiver.sender?.track?.id,
+            currentDirection: videoTransceiver.currentDirection,
+          })
+        } else {
+          // Если не нашли существующий, создаем новый (fallback)
+          console.warn('WARNING: No existing video transceiver found, creating new one')
+          const transceiver = peerConnection.addTransceiver(videoTrack, {
+            direction: 'sendonly',
+          })
+          console.log('New video transceiver created:', {
+            direction: transceiver.direction,
+            mid: transceiver.mid,
+          })
+        }
+
         console.log('Senders count:', peerConnection.getSenders().length)
         console.log('Transceivers count:', peerConnection.getTransceivers().length)
+
+        // Проверяем, что sender имеет трек
+        const senders = peerConnection.getSenders()
+        const videoSender = senders.find((s) => s.track && s.track.kind === 'video')
+        if (videoSender) {
+          console.log('Video sender found:', {
+            trackId: videoSender.track.id,
+            trackKind: videoSender.track.kind,
+            trackEnabled: videoSender.track.enabled,
+            trackReadyState: videoSender.track.readyState,
+          })
+        } else {
+          console.warn('WARNING: No video sender found after adding transceiver!')
+        }
       } catch (error) {
         console.warn('Could not add video track after remote description:', error.message)
         console.warn('Answer will be created without video track')
@@ -162,14 +296,14 @@ app.post('/api/offer', async (req, res) => {
 
     // Проверяем transceivers перед созданием answer
     const transceiversBeforeAnswer = peerConnection.getTransceivers()
-    console.log(`Transceivers count before createAnswer: ${transceiversBeforeAnswer.length}`)
-    transceiversBeforeAnswer.forEach((t, i) => {
-      console.log(
-        `Transceiver ${i} before answer: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}, kind=${
-          t.receiver?.track?.kind || t.sender?.track?.kind || 'unknown'
-        }`
-      )
-    })
+    // console.log(`Transceivers count before createAnswer: ${transceiversBeforeAnswer.length}`)
+    // transceiversBeforeAnswer.forEach((t, i) => {
+    //   console.log(
+    //     `Transceiver ${i} before answer: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}, kind=${
+    //       t.receiver?.track?.kind || t.sender?.track?.kind || 'unknown'
+    //     }`
+    //   )
+    // })
 
     // Создаем answer (теперь с видеотреком, если он был добавлен)
     // Используем опции для создания answer с правильными параметрами
@@ -178,6 +312,8 @@ app.post('/api/offer', async (req, res) => {
     // Детальное логирование SDP для диагностики
     console.log('Answer SDP preview (first 500 chars):', answer.sdp.substring(0, 500))
     console.log('Answer type:', answer.type)
+    console.log('--------------------------------')
+    console.log()
 
     // Проверяем transceivers перед установкой localDescription
     const transceiversBeforeSet = peerConnection.getTransceivers()
@@ -185,6 +321,9 @@ app.post('/api/offer', async (req, res) => {
     transceiversBeforeSet.forEach((t, i) => {
       console.log(`Transceiver ${i} before setLocal: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}`)
     })
+
+    console.log('--------------------------------')
+    console.log()
 
     await peerConnection.setLocalDescription(answer)
 
@@ -194,6 +333,10 @@ app.post('/api/offer', async (req, res) => {
     transceiversAfterSet.forEach((t, i) => {
       console.log(`Transceiver ${i} after setLocal: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}`)
     })
+
+    console.log()
+    console.log('--------------------------------')
+    console.log()
 
     // Проверяем наличие медиа-секций в SDP
     const finalSdp = peerConnection.localDescription.sdp
@@ -212,6 +355,10 @@ app.post('/api/offer', async (req, res) => {
         console.log('Video section:', videoSection[0].substring(0, 300))
       }
     }
+
+    console.log()
+    console.log('--------------------------------')
+    console.log()
 
     // Сохраняем соединение
     connections.set(connId, {
@@ -389,6 +536,11 @@ async function createVideoTrackFromFile(videoPath) {
 
             frameCount++
 
+            // Логируем первые несколько кадров и затем каждые 100 кадров
+            if (frameCount <= 5 || frameCount % 200 === 0 || frameCount === frameSize - 1) {
+              console.log(`Processing frame ${frameCount}, track readyState: ${track.readyState}, track enabled: ${track.enabled}`)
+            }
+
             // RTCVideoSource.onFrame ожидает данные в формате I420 (YUV420p)
             // Преобразуем Buffer в Uint8ClampedArray
             const yuvData = new Uint8ClampedArray(frame)
@@ -405,8 +557,8 @@ async function createVideoTrackFromFile(videoPath) {
               data: yuvData,
             })
           } catch (err) {
-            // Логируем только первые несколько ошибок, чтобы не засорять консоль
-            if (frameCount < 5 && err.message) {
+            // Логируем все ошибки для первых 10 кадров, затем только каждую 100-ю
+            if (frameCount <= 10 || frameCount % 100 === 0) {
               console.error(`Error processing frame ${frameCount}:`, err.message)
             }
           }
@@ -419,12 +571,22 @@ async function createVideoTrackFromFile(videoPath) {
       })
 
       ffmpeg.on('close', (code) => {
+        console.log(`FFmpeg process exited with code ${code}, total frames processed: ${frameCount}`)
         if (code !== 0 && code !== null) {
-          console.log(`FFmpeg process exited with code ${code}`)
+          reject(new Error(`FFmpeg exited with code ${code}`))
         }
       })
 
-      // Игнорируем stderr от ffmpeg (там обычно информация о прогрессе)
+      ffmpeg.stderr.on('data', (data) => {
+        // Логируем первые несколько строк stderr для отладки
+        // const stderrStr = data.toString()
+        // if (frameCount < 5) {
+        //   console.log('FFmpeg stderr:', stderrStr.substring(0, 200))
+        // }
+      })
+
+      // Разрешаем промис сразу после создания трека, не дожидаясь данных
+      console.log('Video track created, waiting for FFmpeg to start sending frames...')
       ffmpeg.stderr.on('data', () => {
         // Игнорируем
       })

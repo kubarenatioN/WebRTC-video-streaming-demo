@@ -324,9 +324,45 @@
 
         // Обработка получения видеопотока
         peerConnection.ontrack = (event) => {
-          console.log('Received track:', event.track)
-          remoteVideo.srcObject = event.streams[0]
-          updateStatus('connected', 'Подключено')
+          console.log('ontrack event received:', {
+            track: event.track,
+            trackId: event.track?.id,
+            trackKind: event.track?.kind,
+            trackEnabled: event.track?.enabled,
+            trackReadyState: event.track?.readyState,
+            streams: event.streams,
+            streamsLength: event.streams?.length,
+            transceiver: event.transceiver,
+          })
+
+          // Проверяем, что есть поток или трек
+          if (event.streams && event.streams.length > 0) {
+            console.log('Setting video srcObject from stream:', event.streams[0])
+            remoteVideo.srcObject = event.streams[0]
+            updateStatus('connected', 'Подключено')
+          } else if (event.track) {
+            // Если потока нет, создаем новый MediaStream из трека
+            console.log('Creating new MediaStream from track')
+            const stream = new MediaStream([event.track])
+            remoteVideo.srcObject = stream
+            updateStatus('connected', 'Подключено')
+            console.log('Video srcObject set from track')
+          } else {
+            console.warn('ontrack event has no track or streams!')
+          }
+
+          // Обработка изменения состояния трека
+          if (event.track) {
+            event.track.onended = () => {
+              console.log('Video track ended')
+            }
+            event.track.onmute = () => {
+              console.log('Video track muted')
+            }
+            event.track.onunmute = () => {
+              console.log('Video track unmuted')
+            }
+          }
         }
 
         // Обработка ICE кандидатов от клиента
@@ -363,6 +399,121 @@
           if (peerConnection.connectionState === 'connected') {
             updateStatus('connected', 'Подключено')
             stopPolling()
+
+            // Проверяем, есть ли уже треки после подключения
+            const receivers = peerConnection.getReceivers()
+            console.log(`Receivers count after connection: ${receivers.length}`)
+            receivers.forEach((receiver, i) => {
+              const track = receiver.track
+              console.log(`Receiver ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}, muted=${track?.muted}`)
+              if (track && track.kind === 'video') {
+                // Если есть видеотрек, но srcObject не установлен, устанавливаем его
+                if (!remoteVideo.srcObject) {
+                  console.log('Setting video srcObject from receiver track')
+
+                  // Убеждаемся, что трек не muted и enabled
+                  if (track.muted) {
+                    console.warn('Track is muted, trying to unmute')
+                    // Трек может быть muted, но это не должно мешать отображению видео
+                  }
+                  if (!track.enabled) {
+                    console.warn('Track is disabled, enabling it')
+                    track.enabled = true
+                  }
+
+                  const stream = new MediaStream([track])
+                  remoteVideo.srcObject = stream
+
+                  // Проверяем состояние после установки
+                  console.log('Video element state after setting srcObject:', {
+                    srcObject: remoteVideo.srcObject,
+                    readyState: remoteVideo.readyState,
+                    paused: remoteVideo.paused,
+                    muted: remoteVideo.muted,
+                    videoWidth: remoteVideo.videoWidth,
+                    videoHeight: remoteVideo.videoHeight,
+                    streamTracks: remoteVideo.srcObject?.getTracks(),
+                    trackReadyState: track.readyState,
+                    trackEnabled: track.enabled,
+                    trackMuted: track.muted,
+                  })
+
+                  // Пытаемся воспроизвести
+                  remoteVideo
+                    .play()
+                    .then(() => {
+                      console.log('Video play() succeeded')
+                      // Проверяем состояние после play()
+                      setTimeout(() => {
+                        console.log('Video state 1 second after play():', {
+                          readyState: remoteVideo.readyState,
+                          paused: remoteVideo.paused,
+                          videoWidth: remoteVideo.videoWidth,
+                          videoHeight: remoteVideo.videoHeight,
+                          trackReadyState: track.readyState,
+                          trackEnabled: track.enabled,
+                          trackMuted: track.muted,
+                        })
+                      }, 1000)
+                    })
+                    .catch((err) => {
+                      console.error('Video play() failed:', err)
+                    })
+
+                  // Добавляем обработчики событий video элемента
+                  remoteVideo.onloadedmetadata = () => {
+                    console.log('Video metadata loaded:', {
+                      videoWidth: remoteVideo.videoWidth,
+                      videoHeight: remoteVideo.videoHeight,
+                      duration: remoteVideo.duration,
+                    })
+                  }
+
+                  remoteVideo.onloadeddata = () => {
+                    console.log('Video data loaded')
+                  }
+
+                  remoteVideo.oncanplay = () => {
+                    console.log('Video can play')
+                  }
+
+                  remoteVideo.onplaying = () => {
+                    console.log('Video is playing')
+                  }
+
+                  remoteVideo.onerror = (e) => {
+                    console.error('Video element error:', e, remoteVideo.error)
+                  }
+
+                  // Добавляем обработчики для трека
+                  track.onended = () => {
+                    console.log('Video track ended')
+                  }
+
+                  track.onmute = () => {
+                    console.log('Video track muted')
+                  }
+
+                  track.onunmute = () => {
+                    console.log('Video track unmuted')
+                  }
+
+                  // Проверяем состояние трека
+                  console.log('Track state:', {
+                    id: track.id,
+                    kind: track.kind,
+                    enabled: track.enabled,
+                    readyState: track.readyState,
+                    muted: track.muted,
+                    settings: track.getSettings ? track.getSettings() : 'getSettings not available',
+                    constraints: track.getConstraints ? track.getConstraints() : 'getConstraints not available',
+                  })
+                } else {
+                  console.log('Video srcObject already set, checking current state')
+                  console.log('Current srcObject tracks:', remoteVideo.srcObject.getTracks())
+                }
+              }
+            })
           } else if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
             updateStatus('disconnected', 'Отключено')
             stopPolling()
