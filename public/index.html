@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebRTC Video Streaming</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        padding: 20px;
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        overflow: hidden;
+      }
+
+      .header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 30px;
+        text-align: center;
+      }
+
+      .header h1 {
+        font-size: 2.5em;
+        margin-bottom: 10px;
+      }
+
+      .content {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        padding: 30px;
+      }
+
+      @media (max-width: 768px) {
+        .content {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .section {
+        background: #f8f9fa;
+        border-radius: 15px;
+        padding: 20px;
+      }
+
+      .section h2 {
+        color: #333;
+        margin-bottom: 15px;
+        font-size: 1.5em;
+      }
+
+      .video-container {
+        position: relative;
+        width: 100%;
+        background: #000;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-bottom: 20px;
+      }
+
+      video {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      .status {
+        padding: 10px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+        font-weight: 500;
+      }
+
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+      }
+
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+      }
+
+      .status.connecting {
+        background: #fff3cd;
+        color: #856404;
+      }
+
+      .video-list {
+        list-style: none;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+
+      .video-item {
+        padding: 15px;
+        margin-bottom: 10px;
+        background: white;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.3s;
+        border: 2px solid transparent;
+      }
+
+      .video-item:hover {
+        background: #e9ecef;
+        border-color: #667eea;
+        transform: translateX(5px);
+      }
+
+      .video-item.active {
+        background: #667eea;
+        color: white;
+        border-color: #764ba2;
+      }
+
+      .video-item-name {
+        font-weight: 600;
+        margin-bottom: 5px;
+      }
+
+      .video-item-size {
+        font-size: 0.9em;
+        opacity: 0.7;
+      }
+
+      button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 8px;
+        font-size: 1em;
+        cursor: pointer;
+        transition: all 0.3s;
+        width: 100%;
+        margin-top: 10px;
+      }
+
+      button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-top: 15px;
+      }
+
+      .controls button {
+        flex: 1;
+        margin: 0;
+      }
+
+      .no-video {
+        text-align: center;
+        padding: 40px;
+        color: #6c757d;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>🎥 WebRTC Video Streaming</h1>
+        <p>Стриминг видео через WebRTC</p>
+      </div>
+
+      <div class="content">
+        <div class="section">
+          <h2>Видео поток</h2>
+          <div id="status" class="status disconnected">Отключено</div>
+          <div class="video-container">
+            <video id="remoteVideo" autoplay playsinline muted></video>
+          </div>
+          <div class="controls">
+            <button id="connectBtn">Подключиться</button>
+            <button id="disconnectBtn" disabled>Отключиться</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Доступные видео</h2>
+          <div id="videoListContainer">
+            <div class="no-video">Загрузка списка видео...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const remoteVideo = document.getElementById('remoteVideo')
+      const connectBtn = document.getElementById('connectBtn')
+      const disconnectBtn = document.getElementById('disconnectBtn')
+      const statusDiv = document.getElementById('status')
+      const videoListContainer = document.getElementById('videoListContainer')
+
+      let peerConnection = null
+      let connectionId = null
+      let currentVideoFile = null
+      let pollingInterval = null
+      let iceCandidatePollingInterval = null
+
+      // Конфигурация ICE серверов
+      const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+
+      // Загрузка списка видео
+      async function loadVideoList() {
+        try {
+          const response = await fetch('/api/videos')
+          const videos = await response.json()
+
+          if (videos.length === 0) {
+            videoListContainer.innerHTML = '<div class="no-video">Нет доступных видео файлов</div>'
+            return
+          }
+
+          const ul = document.createElement('ul')
+          ul.className = 'video-list'
+
+          videos.forEach((video) => {
+            const li = document.createElement('li')
+            li.className = 'video-item'
+            li.innerHTML = `
+                        <div class="video-item-name">${video.name}</div>
+                        <div class="video-item-size">${formatFileSize(video.size)}</div>
+                    `
+            li.addEventListener('click', () => {
+              // Убираем активный класс у всех элементов
+              ul.querySelectorAll('.video-item').forEach((item) => {
+                item.classList.remove('active')
+              })
+              // Добавляем активный класс к выбранному элементу
+              li.classList.add('active')
+              currentVideoFile = video.name
+
+              // Если уже подключены, запрашиваем новое видео
+              if (peerConnection && (peerConnection.connectionState === 'connected' || peerConnection.connectionState === 'connecting')) {
+                requestVideo(video.name)
+              }
+            })
+            ul.appendChild(li)
+          })
+
+          videoListContainer.innerHTML = ''
+          videoListContainer.appendChild(ul)
+        } catch (error) {
+          console.error('Error loading video list:', error)
+          videoListContainer.innerHTML = '<div class="no-video">Ошибка загрузки списка видео</div>'
+        }
+      }
+
+      function formatFileSize(bytes) {
+        if (bytes === 0) return '0 Bytes'
+        const k = 1024
+        const sizes = ['Bytes', 'KB', 'MB', 'GB']
+        const i = Math.floor(Math.log(bytes) / Math.log(k))
+        return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
+      }
+
+      // Подключение к серверу через HTTP
+      async function connect() {
+        if (peerConnection && peerConnection.connectionState !== 'closed') {
+          return
+        }
+
+        updateStatus('connecting', 'Подключение...')
+        connectBtn.disabled = true
+
+        try {
+          await createPeerConnection()
+        } catch (error) {
+          console.error('Error connecting:', error)
+          updateStatus('disconnected', 'Ошибка подключения')
+          connectBtn.disabled = false
+        }
+      }
+
+      // Создание RTCPeerConnection
+      async function createPeerConnection() {
+        peerConnection = new RTCPeerConnection({ iceServers })
+        connectionId = Date.now().toString()
+
+        // Обработка получения видеопотока
+        peerConnection.ontrack = (event) => {
+          console.log('Received track:', event.track)
+          remoteVideo.srcObject = event.streams[0]
+          updateStatus('connected', 'Подключено')
+        }
+
+        // Обработка ICE кандидатов от клиента
+        peerConnection.onicecandidate = async (event) => {
+          if (event.candidate && connectionId) {
+            try {
+              await fetch(`/api/connection/${connectionId}/ice-candidate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ candidate: event.candidate }),
+              })
+              console.log('Sent client ICE candidate')
+            } catch (error) {
+              console.error('Error sending ICE candidate:', error)
+            }
+          }
+        }
+
+        // Обработка изменения состояния соединения
+        peerConnection.onconnectionstatechange = () => {
+          console.log('Connection state:', peerConnection.connectionState)
+          if (peerConnection.connectionState === 'connected') {
+            updateStatus('connected', 'Подключено')
+            stopPolling()
+          } else if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
+            updateStatus('disconnected', 'Отключено')
+            stopPolling()
+          }
+        }
+
+        // Обработка DataChannel
+        peerConnection.ondatachannel = (event) => {
+          const channel = event.channel
+          channel.onmessage = (event) => {
+            const data = JSON.parse(event.data)
+            if (data.type === 'video-info') {
+              console.log('Video info:', data)
+            }
+          }
+        }
+
+        // Создаем и отправляем offer через HTTP
+        await createOffer()
+
+        // Начинаем polling для получения answer и ICE кандидатов
+        startPolling()
+      }
+
+      // Создание offer и отправка через HTTP
+      async function createOffer() {
+        try {
+          const offer = await peerConnection.createOffer()
+          await peerConnection.setLocalDescription(offer)
+
+          const response = await fetch('/api/offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              offer: peerConnection.localDescription,
+              connectionId,
+              videoFile: currentVideoFile,
+            }),
+          })
+
+          if (!response.ok) {
+            throw new Error('Failed to send offer')
+          }
+
+          const data = await response.json()
+          connectionId = data.connectionId
+
+          // Устанавливаем answer
+          if (data.answer) {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
+          }
+        } catch (error) {
+          console.error('Error creating offer:', error)
+          throw error
+        }
+      }
+
+      // Polling для получения ICE кандидатов от сервера
+      function startPolling() {
+        stopPolling() // Останавливаем предыдущий polling если есть
+
+        // Polling для ICE кандидатов
+        iceCandidatePollingInterval = setInterval(async () => {
+          if (!connectionId || !peerConnection) return
+
+          try {
+            const response = await fetch(`/api/connection/${connectionId}/ice-candidates`)
+            if (!response.ok) return
+
+            const data = await response.json()
+            if (data.candidates && data.candidates.length > 0) {
+              for (const candidate of data.candidates) {
+                try {
+                  await peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                  console.log('Added server ICE candidate')
+                } catch (error) {
+                  console.error('Error adding ICE candidate:', error)
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Error polling ICE candidates:', error)
+          }
+        }, 500) // Опрашиваем каждые 500ms
+      }
+
+      // Остановка polling
+      function stopPolling() {
+        if (iceCandidatePollingInterval) {
+          clearInterval(iceCandidatePollingInterval)
+          iceCandidatePollingInterval = null
+        }
+        if (pollingInterval) {
+          clearInterval(pollingInterval)
+          pollingInterval = null
+        }
+      }
+
+      // Запрос видео через HTTP
+      async function requestVideo(videoFile) {
+        if (!connectionId || !peerConnection) return
+
+        try {
+          const response = await fetch(`/api/connection/${connectionId}/video`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoFile }),
+          })
+
+          if (!response.ok) {
+            throw new Error('Failed to request video')
+          }
+
+          console.log('Video stream requested')
+        } catch (error) {
+          console.error('Error requesting video:', error)
+        }
+      }
+
+      // Отключение через HTTP
+      async function disconnect() {
+        stopPolling()
+
+        if (connectionId) {
+          try {
+            await fetch(`/api/connection/${connectionId}`, {
+              method: 'DELETE',
+            })
+          } catch (error) {
+            console.error('Error closing connection:', error)
+          }
+        }
+
+        if (peerConnection) {
+          peerConnection.close()
+          peerConnection = null
+        }
+
+        connectionId = null
+        remoteVideo.srcObject = null
+        updateStatus('disconnected', 'Отключено')
+        connectBtn.disabled = false
+        disconnectBtn.disabled = true
+      }
+
+      // Обновление статуса
+      function updateStatus(state, message) {
+        statusDiv.className = `status ${state}`
+        statusDiv.textContent = message
+
+        if (state === 'connected') {
+          connectBtn.disabled = true
+          disconnectBtn.disabled = false
+        } else {
+          connectBtn.disabled = false
+          disconnectBtn.disabled = true
+        }
+      }
+
+      // Обработчики событий
+      connectBtn.addEventListener('click', connect)
+      disconnectBtn.addEventListener('click', disconnect)
+
+      // Загружаем список видео при загрузке страницы
+      loadVideoList()
+    </script>
+  </body>
+</html>
