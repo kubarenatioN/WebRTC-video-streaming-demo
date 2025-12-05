@@ -313,6 +313,15 @@
         peerConnection = new RTCPeerConnection({ iceServers })
         connectionId = Date.now().toString()
 
+        // Добавляем transceiver для получения видео от сервера
+        // Это указывает серверу, что клиент хочет получать видео
+        if (currentVideoFile) {
+          const transceiver = peerConnection.addTransceiver('video', {
+            direction: 'recvonly', // Клиент хочет только получать видео
+          })
+          console.log('Added video transceiver (recvonly) to receive video from server', transceiver)
+        }
+
         // Обработка получения видеопотока
         peerConnection.ontrack = (event) => {
           console.log('Received track:', event.track)
@@ -382,6 +391,17 @@
       async function createOffer() {
         try {
           const offer = await peerConnection.createOffer()
+
+          // Проверяем, что offer содержит медиа-секции
+          if (offer.sdp) {
+            const videoMatches = offer.sdp.match(/m=video/g)
+            const audioMatches = offer.sdp.match(/m=audio/g)
+            console.log(`Offer SDP media sections - video: ${videoMatches ? videoMatches.length : 0}, audio: ${audioMatches ? audioMatches.length : 0}`)
+            if (videoMatches && videoMatches.length > 0) {
+              console.log('Offer contains video media section - client is requesting video')
+            }
+          }
+
           await peerConnection.setLocalDescription(offer)
 
           const response = await fetch('/api/offer', {

@@ -71,11 +71,22 @@ app.post('/api/offer', async (req, res) => {
     // Обработка ICE кандидатов от сервера
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        // console.log(111, 'Received ICE candidate from server', event.candidate.toJSON())
-
         // Сохраняем кандидат в формате, который можно сериализовать в JSON
-        serverIceCandidates.push(event.candidate)
-        console.log(`Server ICE candidate for ${connId}: ${event.candidate.candidate.substring(0, 50)}`)
+        // Извлекаем все поля вручную для правильной сериализации
+        const candidateData = {
+          candidate: event.candidate.candidate || '',
+          sdpMLineIndex: event.candidate.sdpMLineIndex ?? null,
+          sdpMid: event.candidate.sdpMid ?? null,
+          usernameFragment: event.candidate.usernameFragment || null,
+        }
+
+        if (candidateData.candidate && candidateData.candidate.trim() !== '') {
+          serverIceCandidates.push(candidateData)
+          console.log(`Server ICE candidate for ${connId}: ${candidateData.candidate.substring(0, 60)}`)
+        }
+      } else {
+        // null candidate означает, что все кандидаты собраны
+        console.log(`All ICE candidates gathered for ${connId}, total: ${serverIceCandidates.length}`)
       }
     }
 
@@ -92,8 +103,24 @@ app.post('/api/offer', async (req, res) => {
       }
     }
 
-    // ВАЖНО: Если указан видео файл, добавляем видеотрек ДО установки remoteDescription
-    // Это необходимо, чтобы трек был в состоянии "stable" перед созданием answer
+    // Проверяем offer от клиента перед установкой
+    console.log('Offer from client - type:', offer.type)
+    if (offer.sdp) {
+      const offerVideoMatches = offer.sdp.match(/m=video/g)
+      const offerAudioMatches = offer.sdp.match(/m=audio/g)
+      console.log(`Offer SDP media sections - video: ${offerVideoMatches ? offerVideoMatches.length : 0}, audio: ${offerAudioMatches ? offerAudioMatches.length : 0}`)
+      if (!offerVideoMatches || offerVideoMatches.length === 0) {
+        console.warn('WARNING: Offer from client does not contain video media section!')
+        console.warn('Client may not be requesting video. Offer SDP preview:', offer.sdp.substring(0, 300))
+      }
+    }
+
+    // Устанавливаем offer от клиента ПЕРВЫМ
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+    console.log('Remote description set, signaling state:', peerConnection.signalingState)
+
+    // ВАЖНО: Если указан видео файл, добавляем видеотрек ПОСЛЕ установки remoteDescription
+    // В состоянии "have-remote-offer" можно добавлять новые transceivers для отправки медиа
     let videoTrack = null
     if (videoFile) {
       try {
@@ -107,17 +134,17 @@ app.post('/api/offer', async (req, res) => {
           throw new Error(`Video file not found: ${videoFile}`)
         }
 
-        console.log(`Creating video track before setting remote description: ${videoFile}`)
+        console.log(`Creating video track after setting remote description: ${videoFile}`)
 
-        // Создаем видеотрек из файла ДО установки remoteDescription
+        // Создаем видеотрек из файла
         videoTrack = await createVideoTrackFromFile(videoPath)
 
-        // Добавляем трек в peer connection в состоянии "stable"
-        // Пробуем использовать addTransceiver для явного контроля
+        // Добавляем transceiver ПОСЛЕ установки remoteDescription
+        // В состоянии "have-remote-offer" можно добавлять новые transceivers
         const transceiver = peerConnection.addTransceiver(videoTrack, {
           direction: 'sendonly', // Сервер отправляет видео клиенту
         })
-        console.log('Video transceiver added to peer connection (before remote description)')
+        console.log('Video transceiver added to peer connection (after remote description)')
         console.log('Current signaling state:', peerConnection.signalingState)
         console.log('Track ID:', videoTrack.id)
         console.log('Track kind:', videoTrack.kind)
@@ -128,49 +155,63 @@ app.post('/api/offer', async (req, res) => {
         console.log('Senders count:', peerConnection.getSenders().length)
         console.log('Transceivers count:', peerConnection.getTransceivers().length)
       } catch (error) {
-        console.warn('Could not add video track before remote description:', error.message)
+        console.warn('Could not add video track after remote description:', error.message)
         console.warn('Answer will be created without video track')
       }
     }
 
-    // Устанавливаем offer от клиента
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
-    console.log('Remote description set, signaling state:', peerConnection.signalingState)
-
-    // Проверяем, что трек все еще есть после установки remoteDescription
-    if (videoTrack) {
-      const senders = peerConnection.getSenders()
-      console.log(`Senders count after setRemoteDescription: ${senders.length}`)
-      if (senders.length === 0) {
-        console.warn('WARNING: No senders found after setRemoteDescription!')
-      }
-    }
+    // Проверяем transceivers перед созданием answer
+    const transceiversBeforeAnswer = peerConnection.getTransceivers()
+    console.log(`Transceivers count before createAnswer: ${transceiversBeforeAnswer.length}`)
+    transceiversBeforeAnswer.forEach((t, i) => {
+      console.log(
+        `Transceiver ${i} before answer: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}, kind=${
+          t.receiver?.track?.kind || t.sender?.track?.kind || 'unknown'
+        }`
+      )
+    })
 
     // Создаем answer (теперь с видеотреком, если он был добавлен)
+    // Используем опции для создания answer с правильными параметрами
     const answer = await peerConnection.createAnswer()
 
     // Детальное логирование SDP для диагностики
     console.log('Answer SDP preview (first 500 chars):', answer.sdp.substring(0, 500))
     console.log('Answer type:', answer.type)
 
-    // Проверяем наличие медиа-секций в SDP
-    const videoMediaMatches = answer.sdp.match(/m=video/g)
-    const audioMediaMatches = answer.sdp.match(/m=audio/g)
-    console.log(`Media sections in SDP - video: ${videoMediaMatches ? videoMediaMatches.length : 0}, audio: ${audioMediaMatches ? audioMediaMatches.length : 0}`)
+    // Проверяем transceivers перед установкой localDescription
+    const transceiversBeforeSet = peerConnection.getTransceivers()
+    console.log(`Transceivers before setLocalDescription: ${transceiversBeforeSet.length}`)
+    transceiversBeforeSet.forEach((t, i) => {
+      console.log(`Transceiver ${i} before setLocal: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}`)
+    })
 
-    if (answer.sdp && !answer.sdp.includes('m=video')) {
+    await peerConnection.setLocalDescription(answer)
+
+    // Проверяем transceivers после установки localDescription
+    const transceiversAfterSet = peerConnection.getTransceivers()
+    console.log(`Transceivers after setLocalDescription: ${transceiversAfterSet.length}`)
+    transceiversAfterSet.forEach((t, i) => {
+      console.log(`Transceiver ${i} after setLocal: direction=${t.direction}, mid=${t.mid}, currentDirection=${t.currentDirection}`)
+    })
+
+    // Проверяем наличие медиа-секций в SDP
+    const finalSdp = peerConnection.localDescription.sdp
+    const videoMediaMatches = finalSdp.match(/m=video/g)
+    const audioMediaMatches = finalSdp.match(/m=audio/g)
+    console.log(`Final SDP media sections - video: ${videoMediaMatches ? videoMediaMatches.length : 0}, audio: ${audioMediaMatches ? audioMediaMatches.length : 0}`)
+
+    if (finalSdp && !finalSdp.includes('m=video')) {
       console.warn('WARNING: Answer SDP does not contain video media section!')
-      console.warn('Full SDP:', answer.sdp)
+      console.warn('Full SDP:', finalSdp)
     } else {
       console.log('Answer SDP contains video media section')
       // Логируем секцию видео
-      const videoSection = answer.sdp.match(/m=video[\s\S]*?(?=m=|$)/)
+      const videoSection = finalSdp.match(/m=video[\s\S]*?(?=m=|$)/)
       if (videoSection) {
         console.log('Video section:', videoSection[0].substring(0, 300))
       }
     }
-
-    await peerConnection.setLocalDescription(answer)
 
     // Сохраняем соединение
     connections.set(connId, {
@@ -216,16 +257,17 @@ app.get('/api/connection/:id/ice-candidates', (req, res) => {
   }
 
   // Возвращаем новые кандидаты (те, которые еще не были отправлены)
-  const newCandidates = connection.serverIceCandidates.slice(connection.lastSentCandidateIndex || 0)
+  const lastIndex = connection.lastSentCandidateIndex || 0
+  const newCandidates = connection.serverIceCandidates.slice(lastIndex)
 
-  if (connection.lastSentCandidateIndex === undefined) {
-    connection.lastSentCandidateIndex = 0
-  }
+  console.log(`ICE candidates request for ${id}: total=${connection.serverIceCandidates.length}, lastSent=${lastIndex}, returning=${newCandidates.length}`)
+
+  // Обновляем индекс последнего отправленного кандидата
   connection.lastSentCandidateIndex = connection.serverIceCandidates.length
 
   res.json({
     candidates: newCandidates,
-    // hasMore: false, // В будущем можно добавить логику для определения
+    hasMore: false,
   })
 })
 
