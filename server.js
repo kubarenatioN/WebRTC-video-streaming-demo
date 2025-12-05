@@ -1,3 +1,4 @@
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { spawn } from 'child_process'
 import express from 'express'
 import { readdirSync, statSync } from 'fs'
@@ -232,8 +233,8 @@ async function createVideoTrackFromFile(videoPath) {
       const videoSource = new RTCVideoSource()
       const track = videoSource.createTrack()
 
-      // Используем ffmpeg для декодирования видео
-      const ffmpeg = spawn('ffmpeg', [
+      // Используем локальный бинарник ffmpeg из npm пакета
+      const ffmpeg = spawn(ffmpegInstaller.path, [
         '-re', // Читать с реальной скоростью
         '-i',
         videoPath,
