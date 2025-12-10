@@ -12,7 +12,8 @@
       }
 
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          Oxygen, Ubuntu, Cantarell, sans-serif;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         min-height: 100vh;
         padding: 20px;
@@ -216,9 +217,16 @@
     <script>
       // Проверка загрузки webrtc-adapter
       if (typeof adapter === 'undefined') {
-        console.warn('webrtc-adapter не загружен, возможны проблемы совместимости')
+        console.warn(
+          'webrtc-adapter не загружен, возможны проблемы совместимости'
+        )
       } else {
-        console.log('webrtc-adapter загружен, браузер:', adapter.browserDetails.browser, 'версия:', adapter.browserDetails.version)
+        console.log(
+          'webrtc-adapter загружен, браузер:',
+          adapter.browserDetails.browser,
+          'версия:',
+          adapter.browserDetails.version
+        )
       }
 
       const remoteVideo = document.getElementById('remoteVideo')
@@ -234,7 +242,10 @@
       let iceCandidatePollingInterval = null
 
       // Конфигурация ICE серверов
-      const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+      const ICE_SERVERS = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ]
 
       // Загрузка списка видео
       async function loadVideoList() {
@@ -243,7 +254,8 @@
           const videos = await response.json()
 
           if (videos.length === 0) {
-            videoListContainer.innerHTML = '<div class="no-video">Нет доступных видео файлов</div>'
+            videoListContainer.innerHTML =
+              '<div class="no-video">Нет доступных видео файлов</div>'
             return
           }
 
@@ -255,7 +267,9 @@
             li.className = 'video-item'
             li.innerHTML = `
                         <div class="video-item-name">${video.name}</div>
-                        <div class="video-item-size">${formatFileSize(video.size)}</div>
+                        <div class="video-item-size">${formatFileSize(
+                          video.size
+                        )}</div>
                     `
             li.addEventListener('click', () => {
               // Убираем активный класс у всех элементов
@@ -267,7 +281,11 @@
               currentVideoFile = video.name
 
               // Если уже подключены, запрашиваем новое видео
-              if (peerConnection && (peerConnection.connectionState === 'connected' || peerConnection.connectionState === 'connecting')) {
+              if (
+                peerConnection &&
+                (peerConnection.connectionState === 'connected' ||
+                  peerConnection.connectionState === 'connecting')
+              ) {
                 requestVideo(video.name)
               }
             })
@@ -278,7 +296,8 @@
           videoListContainer.appendChild(ul)
         } catch (error) {
           console.error('Error loading video list:', error)
-          videoListContainer.innerHTML = '<div class="no-video">Ошибка загрузки списка видео</div>'
+          videoListContainer.innerHTML =
+            '<div class="no-video">Ошибка загрузки списка видео</div>'
         }
       }
 
@@ -319,7 +338,10 @@
           const transceiver = peerConnection.addTransceiver('video', {
             direction: 'recvonly', // Клиент хочет только получать видео
           })
-          console.log('Added video transceiver (recvonly) to receive video from server', transceiver)
+          console.log(
+            'Added video transceiver (recvonly) to receive video from server',
+            transceiver
+          )
         }
 
         // Обработка получения видеопотока
@@ -328,7 +350,10 @@
 
           // Проверяем, что есть поток или трек
           if (event.streams && event.streams.length > 0) {
-            console.log('Setting video srcObject from stream:', event.streams[0])
+            console.log(
+              'Setting video srcObject from stream:',
+              event.streams[0]
+            )
             remoteVideo.srcObject = event.streams[0]
             updateStatus('connected', 'Подключено')
           } else if (event.track) {
@@ -385,7 +410,9 @@
 
             receivers.forEach((receiver, i) => {
               const track = receiver.track
-              console.log(`Receiver ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}, muted=${track?.muted}`)
+              console.log(
+                `Receiver ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}, muted=${track?.muted}`
+              )
               if (track && track.kind === 'video') {
                 // Если есть видеотрек, но srcObject не установлен, устанавливаем его
                 if (!remoteVideo.srcObject) {
@@ -485,16 +512,28 @@
                     enabled: track.enabled,
                     readyState: track.readyState,
                     muted: track.muted,
-                    settings: track.getSettings ? track.getSettings() : 'getSettings not available',
-                    constraints: track.getConstraints ? track.getConstraints() : 'getConstraints not available',
+                    settings: track.getSettings
+                      ? track.getSettings()
+                      : 'getSettings not available',
+                    constraints: track.getConstraints
+                      ? track.getConstraints()
+                      : 'getConstraints not available',
                   })
                 } else {
-                  console.log('Video srcObject already set, checking current state')
-                  console.log('Current srcObject tracks:', remoteVideo.srcObject.getTracks())
+                  console.log(
+                    'Video srcObject already set, checking current state'
+                  )
+                  console.log(
+                    'Current srcObject tracks:',
+                    remoteVideo.srcObject.getTracks()
+                  )
                 }
               }
             })
-          } else if (peerConnection.connectionState === 'disconnected' || peerConnection.connectionState === 'failed') {
+          } else if (
+            peerConnection.connectionState === 'disconnected' ||
+            peerConnection.connectionState === 'failed'
+          ) {
             updateStatus('disconnected', 'Отключено')
             stopPolling()
           }
@@ -547,7 +586,9 @@
 
           // Устанавливаем answer
           if (data.answer) {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer))
+            await peerConnection.setRemoteDescription(
+              new RTCSessionDescription(data.answer)
+            )
           }
         } catch (error) {
           console.error('Error creating offer:', error)
@@ -565,7 +606,11 @@
 
           // Проверяем состояние соединения
           const state = peerConnection.connectionState
-          if (state === 'closed' || state === 'failed' || state === 'disconnected') {
+          if (
+            state === 'closed' ||
+            state === 'failed' ||
+            state === 'disconnected'
+          ) {
             stopPolling()
             return
           }
@@ -576,7 +621,9 @@
           }
 
           try {
-            const response = await fetch(`/api/connection/${connectionId}/ice-candidates`)
+            const response = await fetch(
+              `/api/connection/${connectionId}/ice-candidates`
+            )
             if (!response.ok) return
 
             const data = await response.json()
@@ -596,7 +643,10 @@
                   })
 
                   await peerConnection.addIceCandidate(iceCandidate)
-                  console.log('Added server ICE candidate:', candidate.candidate)
+                  console.log(
+                    'Added server ICE candidate:',
+                    candidate.candidate
+                  )
                 } catch (error) {
                   console.error('Error adding ICE candidate:', error)
                 }
@@ -625,11 +675,14 @@
         if (!connectionId || !peerConnection) return
 
         try {
-          const response = await fetch(`/api/connection/${connectionId}/video`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ videoFile }),
-          })
+          const response = await fetch(
+            `/api/connection/${connectionId}/video`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ videoFile }),
+            }
+          )
 
           if (!response.ok) {
             throw new Error('Failed to request video')

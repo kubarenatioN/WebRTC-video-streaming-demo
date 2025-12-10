@@ -7,7 +7,12 @@ import { readdirSync, statSync } from 'fs'
 import { createServer } from 'http'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-const { nonstandard, RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } = wrtc
+const {
+  nonstandard,
+  RTCIceCandidate,
+  RTCPeerConnection,
+  RTCSessionDescription,
+} = wrtc
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -17,7 +22,10 @@ app.use(cors())
 const server = createServer(app)
 
 // Конфигурация ICE сервера
-const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+const iceServers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+]
 
 // Хранилище активных подключений
 // Структура: connectionId -> { pc, answer, serverIceCandidates[], clientIceCandidatesProcessed }
@@ -70,7 +78,10 @@ app.post('/api/offer', async (req, res) => {
     const serverIceCandidates = []
 
     const _onconnectionstatechange = () => {
-      console.log(`Connection state for ${connId} changed to:`, peerConnection.connectionState)
+      console.log(
+        `Connection state for ${connId} changed to:`,
+        peerConnection.connectionState
+      )
 
       if (peerConnection.connectionState === 'connected') {
         console.log(`WebRTC connection established for ${connId}`)
@@ -93,7 +104,9 @@ app.post('/api/offer', async (req, res) => {
         }
       } else {
         // null candidate означает, что все кандидаты собраны
-        console.log(`All ICE candidates gathered for ${connId}, total: ${serverIceCandidates.length}`)
+        console.log(
+          `All ICE candidates gathered for ${connId}, total: ${serverIceCandidates.length}`
+        )
       }
     }
 
@@ -107,7 +120,12 @@ app.post('/api/offer', async (req, res) => {
     // Обработка ошибок ICE
     peerConnection.onicecandidateerror = (event) => {
       const { errorText, errorCode, address } = event
-      console.error(`ICE candidate error for ${connId}:`, errorText, errorCode, address)
+      console.error(
+        `ICE candidate error for ${connId}:`,
+        errorText,
+        errorCode,
+        address
+      )
     }
 
     // Обработка установления соединения
@@ -121,7 +139,10 @@ app.post('/api/offer', async (req, res) => {
     const answer = await peerConnection.createAnswer()
     await peerConnection.setLocalDescription(answer)
     console.log('set local SDP on OFFER')
-    console.log('Remote description set, signaling state:', peerConnection.signalingState)
+    console.log(
+      'Remote description set, signaling state:',
+      peerConnection.signalingState
+    )
 
     // Сохраняем соединение
     connections.set(connId, {
@@ -199,7 +220,10 @@ app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
     })
 
     console.log('Renegotiation completed for', id)
-    console.log('New answer SDP contains video:', pc.localDescription.sdp.includes('m=video'))
+    console.log(
+      'New answer SDP contains video:',
+      pc.localDescription.sdp.includes('m=video')
+    )
 
     res.json({
       answer: pc.localDescription,
@@ -272,7 +296,10 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
     console.log('POST stream/start')
 
     try {
-      const { negotiationNeeded: _negotiationNeeded } = await startStream(id, videoFile)
+      const { negotiationNeeded: _negotiationNeeded } = await startStream(
+        id,
+        videoFile
+      )
       negotiationNeeded = _negotiationNeeded
     } catch (error) {
       return res.status(404).json({ error: 'stream/start 404' })
@@ -336,7 +363,9 @@ async function startStream(conId, videoFile) {
   })
 
   if (videoTrack.readyState !== 'live') {
-    console.warn(`Video track readyState is '${videoTrack.readyState}', expected 'live'`)
+    console.warn(
+      `Video track readyState is '${videoTrack.readyState}', expected 'live'`
+    )
   }
   if (!videoTrack.enabled) {
     console.warn('Video track is disabled, enabling it')
@@ -370,10 +399,15 @@ async function startStream(conId, videoFile) {
   // })
 
   // Ищем существующий transceiver от клиента
-  const videoTransceiver = transceivers.find((t) => t.receiver?.track?.kind === 'video')
+  const videoTransceiver = transceivers.find(
+    (t) => t.receiver?.track?.kind === 'video'
+  )
 
   if (videoTransceiver) {
-    console.log('1. Found existing video transceiver from client:', transceiverToString(videoTransceiver))
+    console.log(
+      '1. Found existing video transceiver from client:',
+      transceiverToString(videoTransceiver)
+    )
 
     // Клиент создал recvonly, но для отправки медиа сервер должен изменить направление на sendonly или sendrecv
     // Если оставить recvonly, currentDirection станет inactive и медиа не будет передаваться
@@ -390,7 +424,10 @@ async function startStream(conId, videoFile) {
     }
 
     // Проверяем результат
-    console.log('2. Video transceiver after adding track:', transceiverToString(videoTransceiver))
+    console.log(
+      '2. Video transceiver after adding track:',
+      transceiverToString(videoTransceiver)
+    )
   }
 
   // Проверяем, что sender имеет трек
@@ -485,14 +522,20 @@ async function createVideoTrackFromFile(videoPath) {
           try {
             // Проверяем размер кадра
             if (frame.length !== frameSize) {
-              console.warn(`Frame ${frameCount} size mismatch: expected ${frameSize}, got ${frame.length}. Skipping.`)
+              console.warn(
+                `Frame ${frameCount} size mismatch: expected ${frameSize}, got ${frame.length}. Skipping.`
+              )
               continue
             }
 
             frameCount++
 
             // Логируем первые несколько кадров и затем каждые 100 кадров
-            if (frameCount <= 5 || frameCount % 200 === 0 || frameCount === frameSize - 1) {
+            if (
+              frameCount <= 5 ||
+              frameCount % 200 === 0 ||
+              frameCount === frameSize - 1
+            ) {
               // console.log(`Processing frame ${frameCount}, track readyState: ${track.readyState}, track enabled: ${track.enabled}`)
             }
 
@@ -502,7 +545,9 @@ async function createVideoTrackFromFile(videoPath) {
 
             // Проверяем, что размер данных правильный перед передачей
             if (yuvData.byteLength !== frameSize) {
-              console.warn(`Uint8ClampedArray size mismatch: expected ${frameSize}, got ${yuvData.byteLength}`)
+              console.warn(
+                `Uint8ClampedArray size mismatch: expected ${frameSize}, got ${yuvData.byteLength}`
+              )
               continue
             }
 
@@ -514,7 +559,10 @@ async function createVideoTrackFromFile(videoPath) {
           } catch (err) {
             // Логируем все ошибки для первых 10 кадров, затем только каждую 100-ю
             if (frameCount <= 10 || frameCount % 100 === 0) {
-              console.error(`Error processing frame ${frameCount}:`, err.message)
+              console.error(
+                `Error processing frame ${frameCount}:`,
+                err.message
+              )
             }
           }
         }
@@ -526,7 +574,9 @@ async function createVideoTrackFromFile(videoPath) {
       })
 
       ffmpeg.on('close', (code) => {
-        console.log(`FFmpeg process exited with code ${code}, total frames processed: ${frameCount}`)
+        console.log(
+          `FFmpeg process exited with code ${code}, total frames processed: ${frameCount}`
+        )
         if (code !== 0 && code !== null) {
           reject(new Error(`FFmpeg exited with code ${code}`))
         }
@@ -541,7 +591,9 @@ async function createVideoTrackFromFile(videoPath) {
       })
 
       // Разрешаем промис сразу после создания трека, не дожидаясь данных
-      console.log('Video track created, waiting for FFmpeg to start sending frames...')
+      console.log(
+        'Video track created, waiting for FFmpeg to start sending frames...'
+      )
       ffmpeg.stderr.on('data', () => {
         // Игнорируем
       })
