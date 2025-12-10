@@ -234,7 +234,7 @@
       let iceCandidatePollingInterval = null
 
       // Конфигурация ICE серверов
-      const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+      const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
 
       // Загрузка списка видео
       async function loadVideoList() {
@@ -310,7 +310,7 @@
 
       // Создание RTCPeerConnection
       async function createPeerConnection() {
-        peerConnection = new RTCPeerConnection({ iceServers })
+        peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS })
         connectionId = Date.now().toString()
 
         // Добавляем transceiver для получения видео от сервера
@@ -324,16 +324,7 @@
 
         // Обработка получения видеопотока
         peerConnection.ontrack = (event) => {
-          console.log('ontrack event received:', {
-            track: event.track,
-            trackId: event.track?.id,
-            trackKind: event.track?.kind,
-            trackEnabled: event.track?.enabled,
-            trackReadyState: event.track?.readyState,
-            streams: event.streams,
-            streamsLength: event.streams?.length,
-            transceiver: event.transceiver,
-          })
+          console.log('ontrack event received:', event)
 
           // Проверяем, что есть поток или трек
           if (event.streams && event.streams.length > 0) {
@@ -354,13 +345,7 @@
           // Обработка изменения состояния трека
           if (event.track) {
             event.track.onended = () => {
-              console.log('Video track ended')
-            }
-            event.track.onmute = () => {
-              console.log('Video track muted')
-            }
-            event.track.onunmute = () => {
-              console.log('Video track unmuted')
+              console.log('Video track ended', event.track)
             }
           }
         }
@@ -383,19 +368,13 @@
 
         // Обработка ошибок ICE кандидатов
         peerConnection.onicecandidateerror = (event) => {
-          console.error('ICE candidate error:', {
-            errorCode: event.errorCode,
-            errorText: event.errorText,
-            address: event.address,
-            port: event.port,
-            url: event.url,
-            errorCodeName: event.errorCodeName,
-          })
+          console.error('ICE candidate error:', event)
         }
 
         // Обработка изменения состояния соединения
         peerConnection.onconnectionstatechange = () => {
           console.log('Connection state:', peerConnection.connectionState)
+
           if (peerConnection.connectionState === 'connected') {
             updateStatus('connected', 'Подключено')
             stopPolling()
@@ -403,6 +382,7 @@
             // Проверяем, есть ли уже треки после подключения
             const receivers = peerConnection.getReceivers()
             console.log(`Receivers count after connection: ${receivers.length}`)
+
             receivers.forEach((receiver, i) => {
               const track = receiver.track
               console.log(`Receiver ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}, muted=${track?.muted}`)
@@ -520,16 +500,16 @@
           }
         }
 
-        // Обработка DataChannel
-        peerConnection.ondatachannel = (event) => {
-          const channel = event.channel
-          channel.onmessage = (event) => {
-            const data = JSON.parse(event.data)
-            if (data.type === 'video-info') {
-              console.log('Video info:', data)
-            }
-          }
-        }
+        // Обработка DataChannel (unused)
+        // peerConnection.ondatachannel = (event) => {
+        //   const channel = event.channel
+        //   channel.onmessage = (event) => {
+        //     const data = JSON.parse(event.data)
+        //     if (data.type === 'video-info') {
+        //       console.log('Video info:', data)
+        //     }
+        //   }
+        // }
 
         // Создаем и отправляем offer через HTTP
         await createOffer()
@@ -544,14 +524,7 @@
           const offer = await peerConnection.createOffer()
 
           // Проверяем, что offer содержит медиа-секции
-          if (offer.sdp) {
-            const videoMatches = offer.sdp.match(/m=video/g)
-            const audioMatches = offer.sdp.match(/m=audio/g)
-            console.log(`Offer SDP media sections - video: ${videoMatches ? videoMatches.length : 0}, audio: ${audioMatches ? audioMatches.length : 0}`)
-            if (videoMatches && videoMatches.length > 0) {
-              console.log('Offer contains video media section - client is requesting video')
-            }
-          }
+          console.log('Offer SDP:', offer.sdp)
 
           await peerConnection.setLocalDescription(offer)
 
