@@ -215,7 +215,6 @@ app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
     // Создаем новый answer (теперь это возможно, т.к. состояние have-remote-offer)
     let answer = await pc.createAnswer()
     answer = setSdpSetupPassive(answer)
-    console.log('answer after setSdpSetupPassive:', answer)
 
     await pc.setLocalDescription(answer)
 
