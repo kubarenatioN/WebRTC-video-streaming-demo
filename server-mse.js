@@ -77,6 +77,8 @@ app.post('/api/offer', async (req, res) => {
     const peerConnection = new RTCPeerConnection({ iceServers })
     const serverIceCandidates = []
 
+    logTransceivers(peerConnection, 'transceivers on offer:')
+
     const _onconnectionstatechange = () => {
       console.log(
         `Connection state for ${connId} changed to:`,
@@ -90,6 +92,8 @@ app.post('/api/offer', async (req, res) => {
 
     const _onicecandidate = (event) => {
       if (event.candidate) {
+        console.log('on ice candidate', event.candidate.candidate)
+
         // Сохраняем кандидат в формате, который можно сериализовать в JSON
         // Извлекаем все поля вручную для правильной сериализации
         const candidateData = {
@@ -119,13 +123,13 @@ app.post('/api/offer', async (req, res) => {
 
     // Обработка ошибок ICE
     peerConnection.onicecandidateerror = (event) => {
-      const { errorText, errorCode, address } = event
-      console.error(
-        `ICE candidate error for ${connId}:`,
-        errorText,
-        errorCode,
-        address
-      )
+      // const { errorText, errorCode, address } = event
+      // console.error(
+      //   `ICE candidate error for ${connId}:`,
+      //   errorText,
+      //   errorCode,
+      //   address
+      // )
     }
 
     // Обработка установления соединения
@@ -214,10 +218,7 @@ app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
     // Обновляем сохраненный answer
     connection.answer = pc.localDescription
 
-    const ts = pc.getTransceivers()
-    ts.forEach((t) => {
-      console.log('transceiver:', transceiverToString(t))
-    })
+    logTransceivers(pc, 'transceivers on renegotiation offer:')
 
     console.log('Renegotiation completed for', id)
     console.log(
@@ -289,6 +290,8 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
     const { id } = req.params
     const { videoFile } = req.body
 
+    console.log(req.body)
+
     const connection = connections.get(id)
     const pc = connection.pc
     let negotiationNeeded = false
@@ -302,6 +305,7 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
       )
       negotiationNeeded = _negotiationNeeded
     } catch (error) {
+      console.log('start stream error:', error)
       return res.status(404).json({ error: 'stream/start 404' })
     }
 
@@ -453,9 +457,8 @@ async function startStream(conId, videoFile) {
   }
 
   const transceivers = pc.getTransceivers()
-  // transceivers.forEach((t) => {
-  //   console.log('transceiver:', transceiverToString(t))
-  // })
+
+  logTransceivers(pc, 'transceivers on start stream:')
 
   // Ищем существующий transceiver от клиента
   const videoTransceiver = transceivers.find(
@@ -591,7 +594,7 @@ async function resumeStream(connection) {
 }
 
 // Запуск сервера
-const PORT = process.env.PORT || 3000
+const PORT = process.env.PORT || 3001
 server.listen(PORT, () => {
   console.log(`WebRTC server running on http://localhost:${PORT}`)
   console.log(`Videos directory: ${VIDEOS_DIR}`)
@@ -756,11 +759,19 @@ async function createVideoTrackFromFile(videoPath, connection, startTime = 0) {
 function transceiverToString(transceiver) {
   return {
     direction: transceiver.direction,
-    mid: transceiver.mid,
     currentDirection: transceiver.currentDirection,
+    mid: transceiver.mid,
     hasReceiver: !!transceiver.receiver?.track,
     receiverTrack: transceiver.receiver?.track?.kind,
     hasSender: !!transceiver.sender?.track,
     senderTrack: transceiver.sender?.track?.kind,
   }
+}
+
+function logTransceivers(pc, msg = 'transceivers:') {
+  console.log(msg)
+
+  pc.getTransceivers().forEach((t) => {
+    console.log('transceiver:', transceiverToString(t))
+  })
 }
