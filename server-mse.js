@@ -140,7 +140,8 @@ app.post('/api/offer', async (req, res) => {
     // Устанавливаем offer от клиента ПЕРВЫМ
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
 
-    const answer = await peerConnection.createAnswer()
+    let answer = await peerConnection.createAnswer()
+    answer = setSdpSetupPassive(answer)
     await peerConnection.setLocalDescription(answer)
     console.log('set local SDP on OFFER')
     console.log(
@@ -212,7 +213,10 @@ app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
     await pc.setRemoteDescription(new RTCSessionDescription(offer))
 
     // Создаем новый answer (теперь это возможно, т.к. состояние have-remote-offer)
-    const answer = await pc.createAnswer()
+    let answer = await pc.createAnswer()
+    answer = setSdpSetupPassive(answer)
+    console.log('answer after setSdpSetupPassive:', answer)
+
     await pc.setLocalDescription(answer)
 
     // Обновляем сохраненный answer
@@ -591,6 +595,33 @@ async function resumeStream(connection) {
   )
 
   return { negotiationNeeded: true }
+}
+
+// Функция для установки setup:passive в SDP
+function setSdpSetupPassive(sdpDescription) {
+  let sdp = sdpDescription.sdp
+
+  // Заменяем существующие атрибуты setup
+  sdp = sdp.replace(/a=setup:(active|actpass|passive)/gi, 'a=setup:passive')
+
+  // Если атрибут setup отсутствует, добавляем его после a=fingerprint
+  // Ищем последний a=fingerprint в SDP
+  const fingerprintRegex = /(a=fingerprint:[^\r\n]+)/g
+  const fingerprints = sdp.match(fingerprintRegex)
+
+  if (fingerprints && !sdp.includes('a=setup:')) {
+    // Добавляем после последнего fingerprint
+    const lastFingerprint = fingerprints[fingerprints.length - 1]
+    sdp = sdp.replace(
+      new RegExp(`(${lastFingerprint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`),
+      `$1\r\na=setup:passive`
+    )
+  }
+
+  return {
+    type: sdpDescription.type,
+    sdp: sdp,
+  }
 }
 
 // Запуск сервера
