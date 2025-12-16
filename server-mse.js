@@ -72,24 +72,23 @@ app.post('/api/offer', async (req, res) => {
 
     // Создаем RTCPeerConnection на сервере
     const peerConnection = new RTCPeerConnection({ iceServers })
-    const serverIceCandidates = []
 
-    logTransceivers(peerConnection, 'transceivers on offer:')
+    const serverIceCandidates = []
 
     const _onconnectionstatechange = () => {
       console.log(
-        `Connection state for ${connId} changed to:`,
+        `Connection state for ${connId}:`,
         peerConnection.connectionState
       )
 
       if (peerConnection.connectionState === 'connected') {
-        console.log(`WebRTC connection established for ${connId}`)
+        console.log(`connectionState: connected, for ${connId}`)
       }
     }
 
     const _onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('on ice candidate', event.candidate.candidate)
+        // console.log('on ice candidate', event.candidate.candidate)
 
         // Сохраняем кандидат в формате, который можно сериализовать в JSON
         // Извлекаем все поля вручную для правильной сериализации
@@ -134,25 +133,47 @@ app.post('/api/offer', async (req, res) => {
 
     peerConnection.onnegotiationneeded = _onnegotiationneeded
 
+    // await waitForIceGathering(peerConnection)
+
     // Устанавливаем offer от клиента ПЕРВЫМ
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
+
+    // После setRemoteDescription transceivers уже созданы на основе offer
+    // Меняем direction ПЕРЕД createAnswer, чтобы включить его в answer сразу
+    const transceivers = peerConnection.getTransceivers()
+    const videoTransceiver = transceivers.find(
+      (t) => t.receiver?.track?.kind === 'video'
+    )
+
+    if (videoTransceiver) {
+      // Клиент создал recvonly, но сервер должен отправлять видео
+      // Меняем направление на sendonly ПЕРЕД createAnswer
+      videoTransceiver.direction = 'sendonly'
+    }
+
+    console.log(
+      1,
+      'Set video transceiver direction to sendonly before creating answer:',
+      transceiverToString(videoTransceiver)
+    )
 
     let answer = await peerConnection.createAnswer()
     answer = setSdpSetupPassive(answer)
     await peerConnection.setLocalDescription(answer)
-    console.log('set local SDP on OFFER')
-    console.log(
-      'Remote description set, signaling state:',
-      peerConnection.signalingState
-    )
+
+    setTimeout(() => {
+      console.log(
+        2,
+        'After createAnswer, video transceiver direction:',
+        transceiverToString(videoTransceiver)
+      )
+    }, 1200)
 
     // Сохраняем соединение
     connections.set(connId, {
       pc: peerConnection,
-      answer: peerConnection.localDescription,
-      negotiationNeeded: false,
-      serverIceCandidates,
-      clientIceCandidatesProcessed: 0,
+      serverIceCandidates: [],
+      lastSentCandidateIndex: 0,
     })
 
     res.json({
@@ -205,7 +226,9 @@ app.get('/api/connection/:id/ice-candidates', (req, res) => {
   const lastIndex = connection.lastSentCandidateIndex || 0
   const newCandidates = connection.serverIceCandidates.slice(lastIndex)
 
-  // console.log(`ICE candidates request for ${id}: total=${connection.serverIceCandidates.length}, lastSent=${lastIndex}, returning=${newCandidates.length}`)
+  // console.log(
+  //   `ICE candidates request for ${id}: total=${connection.serverIceCandidates.length}, lastSent=${lastIndex}, returning=${newCandidates.length}`
+  // )
 
   // Обновляем индекс последнего отправленного кандидата
   connection.lastSentCandidateIndex = connection.serverIceCandidates.length
@@ -219,7 +242,7 @@ app.get('/api/connection/:id/ice-candidates', (req, res) => {
 // POST /api/connection/:id/ice-candidate - отправка ICE кандидата от клиента
 app.post('/api/connection/:id/ice-candidate', async (req, res) => {
   try {
-    console.log('ice candidate POST')
+    console.log('ICE candidate POST\n')
 
     const { id } = req.params
     const { candidate } = req.body
@@ -248,6 +271,8 @@ app.post('/api/connection/:id/stream/play', async (req, res) => {
     const { id } = req.params
     const { videoFile, from } = req.body
     const connection = connections.get(id)
+
+    console.log('POST stream/play')
 
     if (!connection) {
       return res.status(404).json({ error: 'No connection: stream/play' })
@@ -279,7 +304,6 @@ app.post('/api/connection/:id/stream/play', async (req, res) => {
     }
 
     // Преобразуем Unix timestamp (from) в позицию внутри видео
-    // Если from не указан, используем 0 или connection.pausedAt
     let startTime = 0
     if (from) {
       // from - это Unix timestamp, преобразуем его в позицию внутри видео
@@ -297,7 +321,7 @@ app.post('/api/connection/:id/stream/play', async (req, res) => {
       startTime = 0
     }
 
-    console.log('POST stream/play', {
+    console.log({
       videoFile: fileToUse,
       from,
       startTime,
@@ -305,15 +329,11 @@ app.post('/api/connection/:id/stream/play', async (req, res) => {
     })
 
     try {
-      const { negotiationNeeded: _negotiationNeeded } = await playStream(
-        id,
-        videoFile,
-        startTime
-      )
+      const { negotiationNeeded } = await playStream(id, videoFile, startTime)
 
       res.json({
         answer: pc.localDescription,
-        negotiationNeeded: _negotiationNeeded,
+        negotiationNeeded,
       })
     } catch (error) {
       console.log('play stream error:', error)
@@ -380,15 +400,12 @@ async function pauseStream(conId, currentTime) {
     throw new Error('No active stream to pause')
   }
 
-  // Сохраняем позицию паузы (в секундах)
-  connection.pausedAt = currentTime || 0
   connection.isPaused = true
 
-  // Останавливаем FFmpeg процесс
+  // Останавливаем FFmpeg процесс - используем kill() вместо SIGSTOP
+  // SIGSTOP может привести к проблемам при последующем kill()
   if (connection.ffmpeg && !connection.ffmpeg.killed) {
-    connection.ffmpeg.kill('SIGSTOP') // Приостанавливаем процесс
-    // Или можно использовать kill() для полной остановки
-    // connection.ffmpeg.kill()
+    connection.ffmpeg.kill() // Полностью убиваем процесс
   }
 
   connection.videoTrack.enabled = false
@@ -406,19 +423,14 @@ async function playStream(conId, videoFile, startTime) {
     throw new Error('Connection not found')
   }
 
-  // Определяем видео файл: если указан новый - используем его, иначе берем из connection
-  const fileToUse = videoFile || connection.videoFile
-  if (!fileToUse) {
+  if (!videoFile) {
     throw new Error('Video file not specified and no previous video file found')
   }
 
-  // Определяем время начала: если указано явно - используем его,
-  // иначе берем из connection.pausedAt (для resume), или 0 (для нового старта)
+  // Определяем время начала
   const timeToStart = startTime !== undefined ? startTime : 0
 
-  const videoPath = videoFile
-    ? join(VIDEOS_DIR, videoFile) // Новый файл - создаем путь
-    : connection.videoPath // Resume - используем сохраненный путь
+  const videoPath = join(VIDEOS_DIR, videoFile)
 
   // Если указан новый файл, сохраняем его для будущего использования
   if (videoFile) {
@@ -439,9 +451,15 @@ async function playStream(conId, videoFile, startTime) {
     }
   }
 
-  // Убиваем старый FFmpeg процесс, если он есть (как в resume)
+  // ВАЖНО: Сбрасываем isPaused ДО создания нового трека,
+  // чтобы новый FFmpeg процесс не пропускал кадры
+  connection.isPaused = false
+
+  // Убиваем старый FFmpeg процесс, если он есть
   if (connection.ffmpeg && !connection.ffmpeg.killed) {
     connection.ffmpeg.kill()
+    // Даем процессу время завершиться
+    await new Promise((resolve) => setTimeout(resolve, 100))
   }
 
   // Создаем видеотрек из файла с указанным временем начала
@@ -450,6 +468,12 @@ async function playStream(conId, videoFile, startTime) {
     videoSource,
     ffmpeg,
   } = await createVideoTrackFromFile(videoPath, connection, timeToStart)
+
+  console.log('video track created:', {
+    id: videoTrack.id,
+    enabled: videoTrack.enabled,
+    readyState: videoTrack.readyState,
+  })
 
   if (videoTrack.readyState !== 'live') {
     console.warn(
@@ -481,67 +505,54 @@ async function playStream(conId, videoFile, startTime) {
   )
 
   if (videoTransceiver) {
-    // console.log(
-    //   '1. Found existing video transceiver from client:',
-    //   transceiverToString(videoTransceiver)
-    // )
-
-    // Устанавливаем направление на sendonly (сервер отправляет, клиент получает)
+    // Direction уже должен быть установлен в sendonly при обработке offer
+    // Проверяем и логируем, но не меняем (чтобы избежать negotiation needed)
     if (videoTransceiver.direction !== 'sendonly') {
-      videoTransceiver.direction = 'sendonly'
+      console.warn(
+        'Video transceiver direction is not sendonly, was:',
+        videoTransceiver.direction
+      )
+      // Не меняем direction здесь, чтобы избежать negotiation needed
     } else {
-      console.log('direction is already SEND ONLY')
+      console.log('Video transceiver direction is sendonly, OK')
     }
 
     if (videoTransceiver.sender) {
       // Заменяем трек в существующем sender
       await videoTransceiver.sender.replaceTrack(videoTrack)
+
+      // ВАЖНО: Проверяем, что трек действительно заменен
+      const replacedTrack = videoTransceiver.sender.track
+      console.log('After replaceTrack:', {
+        senderTrackId: replacedTrack?.id,
+        senderTrackEnabled: replacedTrack?.enabled,
+        senderTrackReadyState: replacedTrack?.readyState,
+        transceiverDirection: videoTransceiver.direction,
+        transceiverCurrentDirection: videoTransceiver.currentDirection,
+      })
+
+      // Убеждаемся, что новый трек включен
+      if (replacedTrack && !replacedTrack.enabled) {
+        console.warn('Replaced track is disabled, enabling it')
+        replacedTrack.enabled = true
+      }
     } else {
       console.log('Sender does not exist, adding new track')
       const sender = pc.addTrack(videoTrack)
       console.log('Sender added:', sender.id)
     }
-
-    // Проверяем результат
-    console.log(
-      '2. Video transceiver after adding track:',
-      transceiverToString(videoTransceiver)
-    )
   }
 
-  // // Проверяем, что sender имеет трек
-  // const senders = pc.getSenders()
-  // const videoSender = senders.find((s) => s.track && s.track.kind === 'video')
-  // if (videoSender) {
-  //   console.log('Video sender found:', {
-  //     trackId: videoSender.track.id,
-  //     trackKind: videoSender.track.kind,
-  //     trackEnabled: videoSender.track.enabled,
-  //     trackReadyState: videoSender.track.readyState,
-  //   })
-  // } else {
-  //   console.warn('WARNING: No video sender found after adding transceiver!')
-  // }
-
   // Обновляем connection
-  connection.negotiationNeeded = true
   connection.videoTrack = videoTrack
   connection.videoSource = videoSource
   connection.ffmpeg = ffmpeg
-  connection.isPaused = false
-
-  // Очищаем pausedAt после использования (как в resume)
-  if (connection.pausedAt !== undefined) {
-    connection.pausedAt = null
-  }
 
   console.log(
-    `Stream playing for connection ${conId} from ${timeToStart}s${
-      videoFile ? ` (new file: ${videoFile})` : ' (resumed)'
-    }`
+    `Stream playing for connection ${conId} from ${timeToStart}s (${videoFile})`
   )
 
-  return { negotiationNeeded: true }
+  return { negotiationNeeded: false }
 }
 
 async function _handleNegotiation(pc, offer) {
@@ -813,5 +824,30 @@ async function getVideoDuration(videoPath) {
         hours * 3600 + minutes * 60 + seconds + centiseconds / 100
       resolve(duration)
     })
+  })
+}
+
+function waitForIceGathering(pc) {
+  // Wait for local ICE gathering to complete
+  return new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') {
+      resolve()
+      return
+    }
+
+    const checkState = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', checkState)
+        resolve()
+      }
+    }
+
+    pc.addEventListener('icegatheringstatechange', checkState)
+
+    // Timeout fallback
+    setTimeout(() => {
+      pc.removeEventListener('icegatheringstatechange', checkState)
+      resolve()
+    }, 5000)
   })
 }
