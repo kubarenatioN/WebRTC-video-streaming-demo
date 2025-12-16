@@ -28,7 +28,6 @@ const iceServers = [
 ]
 
 // Хранилище активных подключений
-// Структура: connectionId -> { pc, answer, serverIceCandidates[], clientIceCandidatesProcessed }
 const connections = new Map()
 
 // Директория с видео файлами
@@ -59,8 +58,6 @@ app.get('/api/videos', (req, res) => {
 
 // Endpoint для получения видео файла
 app.use('/videos', express.static(VIDEOS_DIR))
-
-// HTTP endpoints для WebRTC signaling
 
 // POST /api/offer - отправка offer от клиента
 app.post('/api/offer', async (req, res) => {
@@ -168,40 +165,11 @@ app.post('/api/offer', async (req, res) => {
   }
 })
 
-// GET /api/connection/:id/answer - получение answer (для polling, если нужно)
-app.get('/api/connection/:id/answer', (req, res) => {
-  const { id } = req.params
-  const connection = connections.get(id)
-
-  if (!connection) {
-    return res.status(404).json({ error: 'Connection not found' })
-  }
-
-  res.json({
-    answer: connection.answer,
-  })
-})
-
-// GET /api/connection/:id/answer - получение answer (для polling, если нужно)
-app.get('/api/connection/:id/negotiation-needed', (req, res) => {
-  const { id } = req.params
-  const connection = connections.get(id)
-
-  if (!connection) {
-    return res.status(404).json({ error: 'negotiationNeeded 404' })
-  }
-
-  res.json({
-    negotiationNeeded: Boolean(connection.negotiationNeeded),
-  })
-})
-
 // POST /api/connection/:id/renegotiation-offer - обработка renegotiation offer от клиента
 app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
   try {
     const { id } = req.params
     const { offer } = req.body
-
     const connection = connections.get(id)
     if (!connection) {
       return res.status(404).json({ error: 'Connection not found' })
@@ -209,25 +177,11 @@ app.post('/api/connection/:id/renegotiation-offer', async (req, res) => {
 
     const pc = connection.pc
 
-    // Устанавливаем новый offer от клиента
-    await pc.setRemoteDescription(new RTCSessionDescription(offer))
-
-    // Создаем новый answer (теперь это возможно, т.к. состояние have-remote-offer)
-    let answer = await pc.createAnswer()
-    answer = setSdpSetupPassive(answer)
-
-    await pc.setLocalDescription(answer)
-
-    // Обновляем сохраненный answer
-    connection.answer = pc.localDescription
-
-    logTransceivers(pc, 'transceivers on renegotiation offer:')
+    _handleNegotiation(pc, offer)
 
     console.log('Renegotiation completed for', id)
-    console.log(
-      'New answer SDP contains video:',
-      pc.localDescription.sdp.includes('m=video')
-    )
+
+    logTransceivers(pc, 'transceivers on renegotiation offer:')
 
     res.json({
       answer: pc.localDescription,
@@ -288,36 +242,85 @@ app.post('/api/connection/:id/ice-candidate', async (req, res) => {
   }
 })
 
-app.post('/api/connection/:id/stream/start', async (req, res) => {
+// Play stream
+app.post('/api/connection/:id/stream/play', async (req, res) => {
   try {
     const { id } = req.params
-    const { videoFile } = req.body
-
-    console.log(req.body)
-
+    const { videoFile, from } = req.body
     const connection = connections.get(id)
-    const pc = connection.pc
-    let negotiationNeeded = false
 
-    console.log('POST stream/start')
-
-    try {
-      const { negotiationNeeded: _negotiationNeeded } = await startStream(
-        id,
-        videoFile
-      )
-      negotiationNeeded = _negotiationNeeded
-    } catch (error) {
-      console.log('start stream error:', error)
-      return res.status(404).json({ error: 'stream/start 404' })
+    if (!connection) {
+      return res.status(404).json({ error: 'No connection: stream/play' })
     }
 
-    res.json({
-      answer: pc.localDescription,
-      negotiationNeeded,
+    const pc = connection.pc
+
+    // Определяем видео файл: если указан новый - используем его, иначе берем из connection
+    const fileToUse = videoFile || connection.videoFile
+    if (!fileToUse) {
+      return res.status(400).json({
+        error: 'Video file not specified and no previous video file found',
+      })
+    }
+
+    const videoPath = videoFile
+      ? join(VIDEOS_DIR, videoFile) // Новый файл - создаем путь
+      : connection.videoPath // Resume - используем сохраненный путь
+
+    // Получаем длительность видео файла
+    let videoFileDuration
+    try {
+      videoFileDuration = await getVideoDuration(videoPath)
+    } catch (error) {
+      console.error('Error getting video duration:', error)
+      return res
+        .status(500)
+        .json({ error: `Failed to get video duration: ${error.message}` })
+    }
+
+    // Преобразуем Unix timestamp (from) в позицию внутри видео
+    // Если from не указан, используем 0 или connection.pausedAt
+    let startTime = 0
+    if (from) {
+      // from - это Unix timestamp, преобразуем его в позицию внутри видео
+      // Используем модуло для получения позиции в диапазоне [0, duration)
+      startTime = from % videoFileDuration
+
+      // Проверяем, что позиция в допустимом диапазоне
+      if (startTime < 0 || startTime >= videoFileDuration) {
+        return res.status(400).json({
+          error: `Start time ${startTime} is out of range [0, ${videoFileDuration})`,
+        })
+      }
+    } else {
+      // Если from не указан, используем сохраненную позицию паузы или 0
+      startTime = 0
+    }
+
+    console.log('POST stream/play', {
+      videoFile: fileToUse,
+      from,
+      startTime,
+      duration: videoFileDuration,
     })
+
+    try {
+      const { negotiationNeeded: _negotiationNeeded } = await playStream(
+        id,
+        videoFile,
+        startTime
+      )
+
+      res.json({
+        answer: pc.localDescription,
+        negotiationNeeded: _negotiationNeeded,
+      })
+    } catch (error) {
+      console.log('play stream error:', error)
+      return res.status(404).json({ error: error.message || 'stream/play 404' })
+    }
   } catch (error) {
-    console.error('Error starting video stream:', error)
+    console.error('Error playing video stream:', error)
     res.status(500).json({ error: error.message })
   }
 })
@@ -342,34 +345,6 @@ app.post('/api/connection/:id/stream/pause', async (req, res) => {
   }
 })
 
-app.post('/api/connection/:id/stream/resume', async (req, res) => {
-  try {
-    const { id } = req.params
-    const connection = connections.get(id)
-    const pc = connection.pc
-
-    if (!connection) {
-      return res.status(404).json({ error: 'Connection not found' })
-    }
-
-    if (!connection.videoTrack) {
-      return res.status(404).json({ error: 'No active stream to resume' })
-    }
-
-    const { negotiationNeeded: _negotiationNeeded } = await resumeStream(
-      connection
-    )
-
-    res.json({
-      success: true,
-      negotiationNeeded: _negotiationNeeded,
-    })
-  } catch (error) {
-    console.error('Error resuming stream:', error)
-    res.status(500).json({ error: error.message })
-  }
-})
-
 // DELETE /api/connection/:id - закрытие соединения
 app.delete('/api/connection/:id', (req, res) => {
   const { id } = req.params
@@ -390,134 +365,9 @@ app.delete('/api/connection/:id', (req, res) => {
   }
 })
 
-async function startStream(conId, videoFile) {
-  const connection = connections.get(conId)
-  const pc = connection.pc
-
-  if (!connection) {
-    throw new Error('Connection not found')
-  }
-
-  const videoPath = join(VIDEOS_DIR, videoFile)
-
-  // Сохраняем путь к видео файлу для возобновления
-  connection.videoFile = videoFile
-  connection.videoPath = videoPath
-
-  // Проверяем существование файла
-  try {
-    statSync(videoPath)
-  } catch {
-    console.error(`Video file not found: ${videoFile}`)
-    throw new Error(`Video file not found: ${videoFile}`)
-  }
-
-  // Создаем видеотрек из файла
-  const {
-    track: videoTrack,
-    videoSource,
-    ffmpeg,
-  } = await createVideoTrackFromFile(videoPath, connection, 0)
-
-  // Убеждаемся, что трек активен
-  console.log('Video track initial state:', {
-    id: videoTrack.id,
-    kind: videoTrack.kind,
-    enabled: videoTrack.enabled,
-    readyState: videoTrack.readyState,
-    muted: videoTrack.muted,
-  })
-
-  if (videoTrack.readyState !== 'live') {
-    console.warn(
-      `Video track readyState is '${videoTrack.readyState}', expected 'live'`
-    )
-  }
-  if (!videoTrack.enabled) {
-    console.warn('Video track is disabled, enabling it')
-    videoTrack.enabled = true
-  }
-
-  // Проверяем состояние трека через небольшую задержку (FFmpeg может еще не начать отправлять кадры)
-  setTimeout(() => {
-    console.log('Video track state after 1 second:', {
-      id: videoTrack.id,
-      enabled: videoTrack.enabled,
-      readyState: videoTrack.readyState,
-      muted: videoTrack.muted,
-    })
-  }, 1000)
-
-  // Добавляем обработчики событий трека для отладки
-  videoTrack.onended = () => {
-    console.log(`Video track ${videoTrack.id} ended`)
-  }
-  videoTrack.onmute = () => {
-    console.log(`Video track ${videoTrack.id} muted`)
-  }
-  videoTrack.onunmute = () => {
-    console.log(`Video track ${videoTrack.id} unmuted`)
-  }
-
-  const transceivers = pc.getTransceivers()
-
-  logTransceivers(pc, 'transceivers on start stream:')
-
-  // Ищем существующий transceiver от клиента
-  const videoTransceiver = transceivers.find(
-    (t) => t.receiver?.track?.kind === 'video'
-  )
-
-  if (videoTransceiver) {
-    console.log(
-      '1. Found existing video transceiver from client:',
-      transceiverToString(videoTransceiver)
-    )
-
-    // Клиент создал recvonly, но для отправки медиа сервер должен изменить направление на sendonly или sendrecv
-    // Если оставить recvonly, currentDirection станет inactive и медиа не будет передаваться
-    // Изменяем направление на sendonly (сервер отправляет, клиент получает)
-    videoTransceiver.direction = 'sendonly'
-
-    if (videoTransceiver.sender) {
-      // set track for sender
-      await videoTransceiver.sender.replaceTrack(videoTrack)
-    } else {
-      console.log('Sender does not exist, adding new track')
-      const sender = pc.addTrack(videoTrack)
-      console.log('Sender added:', sender.id)
-    }
-
-    // Проверяем результат
-    console.log(
-      '2. Video transceiver after adding track:',
-      transceiverToString(videoTransceiver)
-    )
-  }
-
-  // Проверяем, что sender имеет трек
-  const senders = pc.getSenders()
-  const videoSender = senders.find((s) => s.track && s.track.kind === 'video')
-  if (videoSender) {
-    console.log('Video sender found:', {
-      trackId: videoSender.track.id,
-      trackKind: videoSender.track.kind,
-      trackEnabled: videoSender.track.enabled,
-      trackReadyState: videoSender.track.readyState,
-    })
-  } else {
-    console.warn('WARNING: No video sender found after adding transceiver!')
-  }
-
-  // После добавления трека, устанавливаем флаг что нужна renegotiation
-  connection.negotiationNeeded = true
-  connection.videoTrack = videoTrack
-  connection.videoSource = videoSource
-  connection.ffmpeg = ffmpeg
-  connection.isPaused = false
-
-  return { negotiationNeeded: true }
-}
+//
+// ----------------------------
+// ----------------------------
 
 async function pauseStream(conId, currentTime) {
   const connection = connections.get(conId)
@@ -548,52 +398,161 @@ async function pauseStream(conId, currentTime) {
   return { success: true }
 }
 
-async function resumeStream(connection) {
-  // Получаем позицию паузы
-  const resumeFrom = connection.pausedAt || 0
+async function playStream(conId, videoFile, startTime) {
+  const connection = connections.get(conId)
   const pc = connection.pc
 
-  // Убиваем старый FFmpeg процесс
+  if (!connection) {
+    throw new Error('Connection not found')
+  }
+
+  // Определяем видео файл: если указан новый - используем его, иначе берем из connection
+  const fileToUse = videoFile || connection.videoFile
+  if (!fileToUse) {
+    throw new Error('Video file not specified and no previous video file found')
+  }
+
+  // Определяем время начала: если указано явно - используем его,
+  // иначе берем из connection.pausedAt (для resume), или 0 (для нового старта)
+  const timeToStart = startTime !== undefined ? startTime : 0
+
+  const videoPath = videoFile
+    ? join(VIDEOS_DIR, videoFile) // Новый файл - создаем путь
+    : connection.videoPath // Resume - используем сохраненный путь
+
+  // Если указан новый файл, сохраняем его для будущего использования
+  if (videoFile) {
+    connection.videoFile = videoFile
+    connection.videoPath = videoPath
+
+    // Проверяем существование файла только для нового файла
+    try {
+      statSync(videoPath)
+    } catch {
+      console.error(`Video file not found: ${videoFile}`)
+      throw new Error(`Video file not found: ${videoFile}`)
+    }
+  } else {
+    // Для resume проверяем, что videoPath существует
+    if (!connection.videoPath) {
+      throw new Error('No video path found for resume')
+    }
+  }
+
+  // Убиваем старый FFmpeg процесс, если он есть (как в resume)
   if (connection.ffmpeg && !connection.ffmpeg.killed) {
     connection.ffmpeg.kill()
   }
 
-  // Создаем новый видеотрек с позиции паузы
+  // Создаем видеотрек из файла с указанным временем начала
   const {
-    track: newVideoTrack,
+    track: videoTrack,
     videoSource,
     ffmpeg,
-  } = await createVideoTrackFromFile(
-    connection.videoPath,
-    connection,
-    resumeFrom
-  )
+  } = await createVideoTrackFromFile(videoPath, connection, timeToStart)
 
-  // Заменяем трек в transceiver
+  if (videoTrack.readyState !== 'live') {
+    console.warn(
+      `Video track readyState is '${videoTrack.readyState}', expected 'live'`
+    )
+  }
+
+  if (!videoTrack.enabled) {
+    console.warn('Video track is disabled, enabling it')
+    videoTrack.enabled = true
+  }
+
+  // Добавляем обработчики событий трека для отладки
+  videoTrack.onended = () => {
+    console.log(`Video track ${videoTrack.id} ended`)
+  }
+  videoTrack.onmute = () => {
+    console.log(`Video track ${videoTrack.id} muted`)
+  }
+  videoTrack.onunmute = () => {
+    console.log(`Video track ${videoTrack.id} unmuted`)
+  }
+
   const transceivers = pc.getTransceivers()
+
+  // Ищем существующий transceiver от клиента
   const videoTransceiver = transceivers.find(
     (t) => t.receiver?.track?.kind === 'video'
   )
 
-  if (videoTransceiver && videoTransceiver.sender) {
-    await videoTransceiver.sender.replaceTrack(newVideoTrack)
+  if (videoTransceiver) {
+    // console.log(
+    //   '1. Found existing video transceiver from client:',
+    //   transceiverToString(videoTransceiver)
+    // )
+
+    // Устанавливаем направление на sendonly (сервер отправляет, клиент получает)
+    if (videoTransceiver.direction !== 'sendonly') {
+      videoTransceiver.direction = 'sendonly'
+    } else {
+      console.log('direction is already SEND ONLY')
+    }
+
+    if (videoTransceiver.sender) {
+      // Заменяем трек в существующем sender
+      await videoTransceiver.sender.replaceTrack(videoTrack)
+    } else {
+      console.log('Sender does not exist, adding new track')
+      const sender = pc.addTrack(videoTrack)
+      console.log('Sender added:', sender.id)
+    }
+
+    // Проверяем результат
+    console.log(
+      '2. Video transceiver after adding track:',
+      transceiverToString(videoTransceiver)
+    )
   }
 
-  console.log('videoTransceiver:', transceiverToString(videoTransceiver))
+  // // Проверяем, что sender имеет трек
+  // const senders = pc.getSenders()
+  // const videoSender = senders.find((s) => s.track && s.track.kind === 'video')
+  // if (videoSender) {
+  //   console.log('Video sender found:', {
+  //     trackId: videoSender.track.id,
+  //     trackKind: videoSender.track.kind,
+  //     trackEnabled: videoSender.track.enabled,
+  //     trackReadyState: videoSender.track.readyState,
+  //   })
+  // } else {
+  //   console.warn('WARNING: No video sender found after adding transceiver!')
+  // }
 
   // Обновляем connection
-  connection.videoTrack = newVideoTrack
+  connection.negotiationNeeded = true
+  connection.videoTrack = videoTrack
   connection.videoSource = videoSource
   connection.ffmpeg = ffmpeg
   connection.isPaused = false
-  connection.pausedAt = null
 
-  console.log('newVideoTrack enabled:', newVideoTrack.enabled)
+  // Очищаем pausedAt после использования (как в resume)
+  if (connection.pausedAt !== undefined) {
+    connection.pausedAt = null
+  }
+
   console.log(
-    `Stream resumed for connection ${connection.id} from ${resumeFrom}s`
+    `Stream playing for connection ${conId} from ${timeToStart}s${
+      videoFile ? ` (new file: ${videoFile})` : ' (resumed)'
+    }`
   )
 
   return { negotiationNeeded: true }
+}
+
+async function _handleNegotiation(pc, offer) {
+  // Устанавливаем новый offer от клиента
+  await pc.setRemoteDescription(new RTCSessionDescription(offer))
+
+  // Создаем новый answer (теперь это возможно, т.к. состояние have-remote-offer)
+  let answer = await pc.createAnswer()
+  answer = setSdpSetupPassive(answer)
+
+  await pc.setLocalDescription(answer)
 }
 
 // Функция для установки setup:passive в SDP
@@ -803,5 +762,56 @@ function logTransceivers(pc, msg = 'transceivers:') {
 
   pc.getTransceivers().forEach((t) => {
     console.log('transceiver:', transceiverToString(t))
+  })
+}
+
+// Функция для получения длительности видео файла в секундах
+async function getVideoDuration(videoPath) {
+  return new Promise((resolve, reject) => {
+    // Используем ffmpeg для получения информации о длительности
+    // FFmpeg выводит информацию о длительности в stderr при попытке обработки файла
+    const ffmpeg = spawn(ffmpegInstaller.path, [
+      '-i',
+      videoPath,
+      '-f',
+      'null',
+      '-',
+    ])
+
+    let stderrOutput = ''
+
+    // Длительность выводится в stderr
+    ffmpeg.stderr.on('data', (data) => {
+      stderrOutput += data.toString()
+    })
+
+    ffmpeg.on('error', (error) => {
+      reject(new Error(`FFmpeg error: ${error.message}`))
+    })
+
+    ffmpeg.on('close', (code) => {
+      // FFmpeg возвращает ненулевой код при использовании -f null,
+      // но информация о длительности все равно выводится в stderr
+
+      // Парсим длительность из stderr
+      // Формат: Duration: HH:MM:SS.mmm
+      const durationMatch = stderrOutput.match(
+        /Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d{2})/
+      )
+
+      if (!durationMatch) {
+        reject(new Error('Could not parse video duration from ffmpeg output'))
+        return
+      }
+
+      const hours = parseInt(durationMatch[1], 10)
+      const minutes = parseInt(durationMatch[2], 10)
+      const seconds = parseInt(durationMatch[3], 10)
+      const centiseconds = parseInt(durationMatch[4], 10)
+
+      const duration =
+        hours * 3600 + minutes * 60 + seconds + centiseconds / 100
+      resolve(duration)
+    })
   })
 }
