@@ -194,7 +194,7 @@
           <h2>Видео поток</h2>
           <div id="status" class="status disconnected">Отключено</div>
           <div class="video-container">
-            <video id="remoteVideo" autoplay playsinline muted></video>
+            <video id="remoteVideo" autoplay playsinline controls></video>
           </div>
           <div class="controls">
             <button id="connectBtn">Подключиться</button>
@@ -244,7 +244,6 @@
       // Конфигурация ICE серверов
       const ICE_SERVERS = [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
       ]
 
       // Загрузка списка видео
@@ -334,15 +333,13 @@
 
         // Добавляем transceiver для получения видео от сервера
         // Это указывает серверу, что клиент хочет получать видео
-        if (currentVideoFile) {
-          const transceiver = peerConnection.addTransceiver('video', {
-            direction: 'recvonly', // Клиент хочет только получать видео
-          })
-          console.log(
-            'Added video transceiver (recvonly) to receive video from server',
-            transceiver
-          )
-        }
+        const transceiver = peerConnection.addTransceiver('video', {
+          direction: 'recvonly', // Клиент хочет только получать видео
+        })
+        console.log(
+          'Added video transceiver (recvonly) to receive video from server',
+          transceiver
+        )
 
         // Обработка получения видеопотока
         peerConnection.ontrack = (event) => {
@@ -361,8 +358,15 @@
             console.log('Creating new MediaStream from track')
             const stream = new MediaStream([event.track])
             remoteVideo.srcObject = stream
-            updateStatus('connected', 'Подключено')
             console.log('Video srcObject set from track')
+            try {
+              remoteVideo?.play()
+              console.log('Video play() call');
+            } catch (error) {
+              console.warn('Video play error:', error);
+            }
+
+            updateStatus('connected', 'Подключено')
           } else {
             console.warn('ontrack event has no track or streams!')
           }
@@ -397,12 +401,14 @@
         }
 
         // Обработка изменения состояния соединения
-        peerConnection.onconnectionstatechange = () => {
+        peerConnection.onconnectionstatechange = async () => {
           console.log('Connection state:', peerConnection.connectionState)
 
           if (peerConnection.connectionState === 'connected') {
             updateStatus('connected', 'Подключено')
             stopPolling()
+
+            await startVideoStream(currentVideoFile)
 
             // Проверяем, есть ли уже треки после подключения
             const receivers = peerConnection.getReceivers()
@@ -413,122 +419,6 @@
               console.log(
                 `Receiver ${i}: track=${track?.id}, kind=${track?.kind}, enabled=${track?.enabled}, readyState=${track?.readyState}, muted=${track?.muted}`
               )
-              if (track && track.kind === 'video') {
-                // Если есть видеотрек, но srcObject не установлен, устанавливаем его
-                if (!remoteVideo.srcObject) {
-                  console.log('Setting video srcObject from receiver track')
-
-                  // Убеждаемся, что трек не muted и enabled
-                  if (track.muted) {
-                    console.warn('Track is muted, trying to unmute')
-                    // Трек может быть muted, но это не должно мешать отображению видео
-                  }
-                  if (!track.enabled) {
-                    console.warn('Track is disabled, enabling it')
-                    track.enabled = true
-                  }
-
-                  const stream = new MediaStream([track])
-                  remoteVideo.srcObject = stream
-
-                  // Проверяем состояние после установки
-                  console.log('Video element state after setting srcObject:', {
-                    srcObject: remoteVideo.srcObject,
-                    readyState: remoteVideo.readyState,
-                    paused: remoteVideo.paused,
-                    muted: remoteVideo.muted,
-                    videoWidth: remoteVideo.videoWidth,
-                    videoHeight: remoteVideo.videoHeight,
-                    streamTracks: remoteVideo.srcObject?.getTracks(),
-                    trackReadyState: track.readyState,
-                    trackEnabled: track.enabled,
-                    trackMuted: track.muted,
-                  })
-
-                  // Пытаемся воспроизвести
-                  remoteVideo
-                    .play()
-                    .then(() => {
-                      console.log('Video play() succeeded')
-                      // Проверяем состояние после play()
-                      setTimeout(() => {
-                        console.log('Video state 1 second after play():', {
-                          readyState: remoteVideo.readyState,
-                          paused: remoteVideo.paused,
-                          videoWidth: remoteVideo.videoWidth,
-                          videoHeight: remoteVideo.videoHeight,
-                          trackReadyState: track.readyState,
-                          trackEnabled: track.enabled,
-                          trackMuted: track.muted,
-                        })
-                      }, 1000)
-                    })
-                    .catch((err) => {
-                      console.error('Video play() failed:', err)
-                    })
-
-                  // Добавляем обработчики событий video элемента
-                  remoteVideo.onloadedmetadata = () => {
-                    console.log('Video metadata loaded:', {
-                      videoWidth: remoteVideo.videoWidth,
-                      videoHeight: remoteVideo.videoHeight,
-                      duration: remoteVideo.duration,
-                    })
-                  }
-
-                  remoteVideo.onloadeddata = () => {
-                    console.log('Video data loaded')
-                  }
-
-                  remoteVideo.oncanplay = () => {
-                    console.log('Video can play')
-                  }
-
-                  remoteVideo.onplaying = () => {
-                    console.log('Video is playing')
-                  }
-
-                  remoteVideo.onerror = (e) => {
-                    console.error('Video element error:', e, remoteVideo.error)
-                  }
-
-                  // Добавляем обработчики для трека
-                  track.onended = () => {
-                    console.log('Video track ended')
-                  }
-
-                  track.onmute = () => {
-                    console.log('Video track muted')
-                  }
-
-                  track.onunmute = () => {
-                    console.log('Video track unmuted')
-                  }
-
-                  // Проверяем состояние трека
-                  console.log('Track state:', {
-                    id: track.id,
-                    kind: track.kind,
-                    enabled: track.enabled,
-                    readyState: track.readyState,
-                    muted: track.muted,
-                    settings: track.getSettings
-                      ? track.getSettings()
-                      : 'getSettings not available',
-                    constraints: track.getConstraints
-                      ? track.getConstraints()
-                      : 'getConstraints not available',
-                  })
-                } else {
-                  console.log(
-                    'Video srcObject already set, checking current state'
-                  )
-                  console.log(
-                    'Current srcObject tracks:',
-                    remoteVideo.srcObject.getTracks()
-                  )
-                }
-              }
             })
           } else if (
             peerConnection.connectionState === 'disconnected' ||
@@ -552,15 +442,13 @@
           const offer = await peerConnection.createOffer()
 
           // Проверяем, что offer содержит медиа-секции
-          console.log('Offer SDP:', offer.sdp)
-
-          await peerConnection.setLocalDescription(offer)
+          // console.log('Offer SDP:', offer.sdp)
 
           const response = await fetch('/api/offer', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              offer: peerConnection.localDescription,
+              offer: offer,
               connectionId,
               videoFile: currentVideoFile,
             }),
@@ -573,6 +461,8 @@
           const data = await response.json()
           connectionId = data.connectionId
 
+          await peerConnection.setLocalDescription(offer)
+
           // Устанавливаем answer
           if (data.answer) {
             await peerConnection.setRemoteDescription(
@@ -582,6 +472,38 @@
         } catch (error) {
           console.error('Error creating offer:', error)
           throw error
+        }
+      }
+
+      // Запуск стриминга видео через /start endpoint
+      async function startVideoStream(videoFile) {
+        if (!connectionId || !peerConnection) {
+          console.error('No connection available')
+          return
+        }
+
+        try {
+          const url = `/api/connection/${connectionId}/stream/start`
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoFile }),
+          })
+
+          if (!response.ok) {
+            throw new Error('Failed to start video stream')
+          }
+
+          const data = await response.json()
+          console.log('Video stream started:', data)
+
+          // Если нужна renegotiation, выполняем её
+          if (data.negotiationNeeded) {
+            console.log('Negotiation needed, starting renegotiation...')
+            await renegotiate()
+          }
+        } catch (error) {
+          console.error('Error starting video stream:', error)
         }
       }
 
@@ -680,6 +602,36 @@
           console.log('Video stream requested')
         } catch (error) {
           console.error('Error requesting video:', error)
+        }
+      }
+
+      // Функция для renegotiation
+      async function renegotiate() {
+        if (!peerConnection || !connectionId) return
+        
+        try {
+          const offer = await peerConnection.createOffer()
+          await peerConnection.setLocalDescription(offer)
+          
+          const response = await fetch(`/api/connection/${connectionId}/renegotiation-offer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ offer }),
+          })
+          
+          if (!response.ok) {
+            throw new Error('Failed to send renegotiation offer')
+          }
+          
+          const data = await response.json()
+          if (data.answer) {
+            await peerConnection.setRemoteDescription(
+              new RTCSessionDescription(data.answer)
+            )
+            console.log('Renegotiation completed')
+          }
+        } catch (error) {
+          console.error('Error during renegotiation:', error)
         }
       }
 

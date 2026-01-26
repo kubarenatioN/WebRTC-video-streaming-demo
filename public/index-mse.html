@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTC Player — pure JS</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --card: #121821;
+        --muted: #8aa0b2;
+        --fg: #e7f0f7;
+        --accent: #4cc3ff;
+        --danger: #ff6b6b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu,
+          Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji',
+          'Segoe UI Emoji';
+        color: var(--fg);
+        background: linear-gradient(180deg, #0b0f14, #0a0d12 30%, #0b0f14);
+      }
+
+      header {
+        padding: 18px 20px;
+        border-bottom: 1px solid #1d2633;
+        position: sticky;
+        top: 0;
+        backdrop-filter: blur(6px);
+        background: rgba(11, 15, 20, 0.7);
+        z-index: 10;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: 0.2px;
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 18px auto 48px;
+        padding: 0 16px;
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        gap: 16px;
+      }
+
+      @media (max-width: 980px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid #1b2431;
+        border-radius: 14px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+      }
+
+      .pane {
+        padding: 14px;
+      }
+
+      .pane h2 {
+        margin: 6px 0 12px;
+        font-size: 14px;
+        color: var(--muted);
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+
+      label {
+        display: block;
+        margin: 6px 0 6px;
+        font-weight: 600;
+        color: #b8c7d6;
+        font-size: 12px;
+      }
+
+      input[type='text'],
+      input[type='url'],
+      textarea,
+      select {
+        width: 100%;
+        background: #0d141d;
+        border: 1px solid #233044;
+        color: var(--fg);
+        border-radius: 10px;
+        padding: 10px 12px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 76px;
+        resize: vertical;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 4px;
+      }
+
+      .btns {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      button {
+        appearance: none;
+        background: #162131;
+        color: var(--fg);
+        border: 1px solid #253449;
+        padding: 10px 14px;
+        border-radius: 12px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      button.primary {
+        background: linear-gradient(180deg, #1d3350, #15263b);
+        border-color: #2f4968;
+      }
+
+      button.accent {
+        background: linear-gradient(180deg, #1c3a4b, #123244);
+        border-color: #234b60;
+        box-shadow: inset 0 0 0 1px rgba(76, 195, 255, 0.25);
+      }
+
+      button.danger {
+        background: #2a1515;
+        border-color: #4a2323;
+        color: #ffdede;
+      }
+
+      video {
+        background: #535975;
+        border-radius: 14px;
+        display: block;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .log {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          'Liberation Mono', monospace;
+        font-size: 12px;
+        background: #0b1119;
+        border-top: 1px solid #1a2433;
+        padding: 10px;
+        /* широкий и высокий блок с прокруткой на всю ширину правой карточки */
+        min-height: 220px;
+        max-height: 380px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+
+      .kv {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 8px;
+      }
+
+      .kv div {
+        padding: 6px 8px;
+        background: #0b1119;
+        border: 1px solid #1a2433;
+        border-radius: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #0d1520;
+        border: 1px solid #233044;
+        font-size: 11px;
+        color: #c6d6e6;
+      }
+
+      footer {
+        max-width: 1100px;
+        margin: 0 auto 24px;
+        padding: 0 16px;
+        color: #8aa0b2;
+      }
+
+      code.inline {
+        background: #0b1119;
+        padding: 2px 6px;
+        border-radius: 6px;
+        border: 1px solid #1a2433;
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>WebRTC Player (pure JS) · Offer/Answer & Manual modes</h1>
+    </header>
+
+    <main>
+      <!-- Левая колонка: сигналинг + параметры -->
+      <section class="card">
+        <div class="pane">
+          <h2>1) Сигналинг</h2>
+          <label for="mode">Режим</label>
+          <select id="mode">
+            <option value="url">URL (POST offer → answer SDP в ответе)</option>
+            <!-- <option value="manual">Manual (вставка answer SDP)</option> -->
+          </select>
+
+          <div id="urlBlock">
+            <label for="signalUrl">Signal URL</label>
+            <input
+              id="signalUrl"
+              type="url"
+              value="http://192.168.200.31:8444/0/0/live.sdp"
+              placeholder="https://server.example.com/webrtc"
+            />
+            <div class="grid">
+              <div>
+                <label for="method">HTTP метод</label>
+                <select id="method">
+                  <option>POST</option>
+                  <!-- <option>PUT</option> -->
+                </select>
+              </div>
+              <div>
+                <label for="contentType">Content-Type</label>
+                <select id="contentType">
+                  <option>application/sdp</option>
+                  <!-- <option>application/json</option>
+                  <option>text/plain</option> -->
+                </select>
+              </div>
+            </div>
+
+            <label for="headers"
+              >Заголовки (JSON, например Authorization)</label
+            >
+            <textarea
+              id="headers"
+              placeholder='{"Authorization":"Bearer …"}'
+            ></textarea>
+            <div class="hint">
+              Ожидается, что сервер вернёт answer SDP целиком в теле ответа.
+              Совместимо с WHEP/WHIP-подобными точками.
+            </div>
+          </div>
+
+          <div id="manualBlock" style="display: none">
+            <label for="remoteSdp">Вставьте answer SDP</label>
+            <textarea
+              id="remoteSdp"
+              placeholder="v=0
+o=...
+s=...
+..."
+            ></textarea>
+          </div>
+        </div>
+
+        <div class="pane">
+          <h2>2) Параметры PeerConnection</h2>
+          <div class="grid">
+            <div>
+              <label for="bundle">Bundle policy</label>
+              <select id="bundle">
+                <option>balanced</option>
+                <option>max-bundle</option>
+                <option>max-compat</option>
+              </select>
+            </div>
+            <div>
+              <label for="iceTransport">ICE transport</label>
+              <select id="iceTransport">
+                <option>all</option>
+                <option>relay</option>
+                <option>none</option>
+              </select>
+            </div>
+          </div>
+          <label for="iceservers">ICE servers (JSON массив)</label>
+          <textarea
+            id="iceservers"
+            placeholder='[{"urls":["stun:stun.l.google.com:19302"]}]'
+          ></textarea>
+
+          <div class="grid">
+            <div>
+              <label for="prefCodec">Предпочтительный видео кодек</label>
+              <select id="prefCodec">
+                <option value="">auto</option>
+                <option value="video/VP8">VP8</option>
+                <option value="video/VP9">VP9</option>
+                <option value="video/H264">H264</option>
+                <option value="video/AV1">AV1</option>
+              </select>
+            </div>
+            <div>
+              <label for="mtu">maxBitrate (kbps) (опц.)</label>
+              <input id="mtu" type="text" placeholder="например 2500" />
+            </div>
+          </div>
+
+          <div class="btns">
+            <button id="btnStart" class="primary">Start</button>
+            <button id="btnStop" class="danger">Stop</button>
+            <button id="btnSnap" class="accent">Snapshot</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Правая колонка: видео + ШИРОКИЕ логи -->
+      <section class="card">
+        <video
+          id="video"
+          playsinline
+          autoplay
+          muted
+          width="600"
+          height="400"
+        ></video>
+        <canvas id="canvas" style="display: none"></canvas>
+
+        <div class="pane">
+          <h2>Плеер</h2>
+          <div class="hint">
+            Видео автозапускается без звука (политика браузера). При
+            необходимости включите звук программно после установления
+            соединения.
+          </div>
+        </div>
+
+        <div class="pane">
+          <h2>3) Отладка</h2>
+          <div class="kv" id="stateKV">
+            <div>ICE:</div>
+            <div id="iceState" class="pill">-</div>
+            <div>DTLS:</div>
+            <div id="dtlsState" class="pill">-</div>
+            <div>Conn:</div>
+            <div id="connState" class="pill">-</div>
+            <div>Codec:</div>
+            <div id="codecInfo" class="pill">-</div>
+            <div>Jitter:</div>
+            <div id="jitter" class="pill">-</div>
+            <div>Bitrate↓:</div>
+            <div id="bitrate" class="pill">-</div>
+            <div>Frames↓:</div>
+            <div id="frames" class="pill">-</div>
+          </div>
+          <div class="log" id="log"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Поддержка: Offer/Answer по URL (application/sdp/text/plain/json) или
+        ручная вставка answer SDP. Плеер добавляет
+        <code class="inline">recvonly</code> видео-трансивер. Можно указать ICE
+        servers/STUN/TURN от медиасервера.
+      </p>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>
