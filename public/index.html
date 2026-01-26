@@ -408,8 +408,6 @@
             updateStatus('connected', 'Подключено')
             stopPolling()
 
-            await startVideoStream(currentVideoFile)
-
             // Проверяем, есть ли уже треки после подключения
             const receivers = peerConnection.getReceivers()
             console.log(`Receivers count after connection: ${receivers.length}`)

@@ -65,7 +65,7 @@ app.use('/videos', express.static(VIDEOS_DIR))
 // POST /api/offer - отправка offer от клиента
 app.post('/api/offer', async (req, res) => {
   try {
-    const { offer, connectionId } = req.body
+    const { offer, connectionId, videoFile } = req.body
 
     if (!offer) {
       return res.status(400).json({ error: 'Offer is required' })
@@ -136,9 +136,60 @@ app.post('/api/offer', async (req, res) => {
     // Устанавливаем offer от клиента ПЕРВЫМ
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
 
+    // НОВОЕ: Если videoFile передан, создаем трек ДО создания answer
+    let videoTrack = null
+    let videoSource = null
+    let ffmpeg = null
+    
+    if (videoFile) {
+      try {
+        const videoPath = join(VIDEOS_DIR, videoFile)
+        
+        // Проверяем существование файла
+        statSync(videoPath)
+        
+        console.log(`Creating video track for ${videoFile} before answer creation`)
+        
+        // Создаем видеотрек
+        const trackData = await createVideoTrackFromFile(videoPath, { isPaused: false }, 0)
+        videoTrack = trackData.track
+        videoSource = trackData.videoSource
+        ffmpeg = trackData.ffmpeg
+        
+        // Находим transceiver от клиента (recvonly)
+        const transceivers = peerConnection.getTransceivers()
+        const videoTransceiver = transceivers.find(
+          (t) => t.receiver?.track?.kind === 'video' || t.receiver?.track === null
+        )
+        
+        if (videoTransceiver) {
+          // Меняем направление на sendonly и добавляем трек
+          videoTransceiver.direction = 'sendonly'
+          
+          if (videoTransceiver.sender) {
+            await videoTransceiver.sender.replaceTrack(videoTrack)
+          } else {
+            // Если sender нет, добавляем трек напрямую
+            peerConnection.addTrack(videoTrack)
+          }
+          
+          console.log('Video track added to transceiver before answer creation')
+        } else {
+          // Если transceiver нет, создаем новый
+          const newTransceiver = peerConnection.addTransceiver(videoTrack, {
+            direction: 'sendonly'
+          })
+          console.log('New transceiver created with video track')
+        }
+      } catch (error) {
+        console.error('Error creating video track in offer:', error)
+        // Продолжаем без видео, можно будет добавить позже через renegotiation
+      }
+    }
+
     const answer = await peerConnection.createAnswer()
     await peerConnection.setLocalDescription(answer)
-    console.log('set local SDP on OFFER')
+    console.log('set local SDP on -- OFFER --')
     console.log(
       'Remote description set, signaling state:',
       peerConnection.signalingState
@@ -151,6 +202,12 @@ app.post('/api/offer', async (req, res) => {
       negotiationNeeded: false,
       serverIceCandidates,
       clientIceCandidatesProcessed: 0,
+      videoTrack,      // Сохраняем трек
+      videoSource,     // Сохраняем source
+      ffmpeg,          // Сохраняем ffmpeg процесс
+      videoFile: videoFile || null,
+      videoPath: videoFile ? join(VIDEOS_DIR, videoFile) : null,
+      isPaused: false,
     })
 
     res.json({
@@ -296,7 +353,7 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
     console.log('POST stream/start')
 
     try {
-      const { negotiationNeeded: _negotiationNeeded } = await startStream(
+      const { negotiationNeeded: _negotiationNeeded, videoTrack } = await startStream(
         id,
         videoFile
       )
@@ -510,7 +567,7 @@ async function startStream(conId, videoFile) {
   connection.ffmpeg = ffmpeg
   connection.isPaused = false
 
-  return { negotiationNeeded: true }
+  return { negotiationNeeded: true, videoTrack }
 }
 
 async function pauseStream(conId, currentTime) {
