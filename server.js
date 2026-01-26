@@ -111,7 +111,7 @@ app.post('/api/offer', async (req, res) => {
     }
 
     const _onnegotiationneeded = (e) => {
-      console.log('negotiation needed')
+      console.log('negotiation needed', e.type)
     }
 
     // Обработка ICE кандидатов от сервера
@@ -315,7 +315,53 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
   }
 })
 
-app.post('/api/connection/:id/stream/pause', async (req, res) => {})
+app.post('/api/connection/:id/stream/pause', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { currentTime } = req.body
+    const connection = connections.get(id)
+
+    if (!connection) {
+      return res.status(404).json({ error: 'Connection not found' })
+    }
+
+    console.log('stream/pause at time from client:', currentTime)
+
+    await pauseStream(id, currentTime)
+    res.json({ success: true })
+  } catch (error) {
+    console.error('Error pausing stream:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+app.post('/api/connection/:id/stream/resume', async (req, res) => {
+  try {
+    const { id } = req.params
+    const connection = connections.get(id)
+    const pc = connection.pc
+
+    if (!connection) {
+      return res.status(404).json({ error: 'Connection not found' })
+    }
+
+    if (!connection.videoTrack) {
+      return res.status(404).json({ error: 'No active stream to resume' })
+    }
+
+    const { negotiationNeeded: _negotiationNeeded } = await resumeStream(
+      connection
+    )
+
+    res.json({
+      success: true,
+      negotiationNeeded: _negotiationNeeded,
+    })
+  } catch (error) {
+    console.error('Error resuming stream:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
 
 // DELETE /api/connection/:id - закрытие соединения
 app.delete('/api/connection/:id', (req, res) => {
@@ -323,6 +369,11 @@ app.delete('/api/connection/:id', (req, res) => {
   const connection = connections.get(id)
 
   if (connection) {
+    // Останавливаем FFmpeg если он запущен
+    if (connection.ffmpeg && !connection.ffmpeg.killed) {
+      connection.ffmpeg.kill()
+    }
+
     connection.pc.close()
     connections.delete(id)
     console.log(`Connection ${id} closed`)
@@ -342,6 +393,10 @@ async function startStream(conId, videoFile) {
 
   const videoPath = join(VIDEOS_DIR, videoFile)
 
+  // Сохраняем путь к видео файлу для возобновления
+  connection.videoFile = videoFile
+  connection.videoPath = videoPath
+
   // Проверяем существование файла
   try {
     statSync(videoPath)
@@ -351,7 +406,11 @@ async function startStream(conId, videoFile) {
   }
 
   // Создаем видеотрек из файла
-  const videoTrack = await createVideoTrackFromFile(videoPath)
+  const {
+    track: videoTrack,
+    videoSource,
+    ffmpeg,
+  } = await createVideoTrackFromFile(videoPath, connection, 0)
 
   // Убеждаемся, что трек активен
   console.log('Video track initial state:', {
@@ -446,15 +505,90 @@ async function startStream(conId, videoFile) {
 
   // После добавления трека, устанавливаем флаг что нужна renegotiation
   connection.negotiationNeeded = true
-
-  // Проверяем наличие медиа-секций в SDP
-  // const finalSdp = pc.localDescription.sdp
-  // checkMediaSections(finalSdp)
+  connection.videoTrack = videoTrack
+  connection.videoSource = videoSource
+  connection.ffmpeg = ffmpeg
+  connection.isPaused = false
 
   return { negotiationNeeded: true }
 }
 
-async function pauseStream() {}
+async function pauseStream(conId, currentTime) {
+  const connection = connections.get(conId)
+
+  if (!connection) {
+    throw new Error('Connection not found')
+  }
+
+  if (!connection.videoTrack) {
+    throw new Error('No active stream to pause')
+  }
+
+  // Сохраняем позицию паузы (в секундах)
+  connection.pausedAt = currentTime || 0
+  connection.isPaused = true
+
+  // Останавливаем FFmpeg процесс
+  if (connection.ffmpeg && !connection.ffmpeg.killed) {
+    connection.ffmpeg.kill('SIGSTOP') // Приостанавливаем процесс
+    // Или можно использовать kill() для полной остановки
+    // connection.ffmpeg.kill()
+  }
+
+  connection.videoTrack.enabled = false
+
+  console.log(`Stream paused for connection ${conId} at ${currentTime}s`)
+
+  return { success: true }
+}
+
+async function resumeStream(connection) {
+  // Получаем позицию паузы
+  const resumeFrom = connection.pausedAt || 0
+  const pc = connection.pc
+
+  // Убиваем старый FFmpeg процесс
+  if (connection.ffmpeg && !connection.ffmpeg.killed) {
+    connection.ffmpeg.kill()
+  }
+
+  // Создаем новый видеотрек с позиции паузы
+  const {
+    track: newVideoTrack,
+    videoSource,
+    ffmpeg,
+  } = await createVideoTrackFromFile(
+    connection.videoPath,
+    connection,
+    resumeFrom
+  )
+
+  // Заменяем трек в transceiver
+  const transceivers = pc.getTransceivers()
+  const videoTransceiver = transceivers.find(
+    (t) => t.receiver?.track?.kind === 'video'
+  )
+
+  if (videoTransceiver && videoTransceiver.sender) {
+    await videoTransceiver.sender.replaceTrack(newVideoTrack)
+  }
+
+  console.log('videoTransceiver:', transceiverToString(videoTransceiver))
+
+  // Обновляем connection
+  connection.videoTrack = newVideoTrack
+  connection.videoSource = videoSource
+  connection.ffmpeg = ffmpeg
+  connection.isPaused = false
+  connection.pausedAt = null
+
+  console.log('newVideoTrack enabled:', newVideoTrack.enabled)
+  console.log(
+    `Stream resumed for connection ${connection.id} from ${resumeFrom}s`
+  )
+
+  return { negotiationNeeded: true }
+}
 
 // Запуск сервера
 const PORT = process.env.PORT || 3000
@@ -473,7 +607,7 @@ server.listen(PORT, () => {
 })
 
 // Функция для создания видеотрека из видео файла
-async function createVideoTrackFromFile(videoPath) {
+async function createVideoTrackFromFile(videoPath, connection, startTime = 0) {
   return new Promise((resolve, reject) => {
     try {
       // Используем nonstandard API из wrtc для создания видеотрека
@@ -491,22 +625,30 @@ async function createVideoTrackFromFile(videoPath) {
       const videoSource = new RTCVideoSource()
       const track = videoSource.createTrack()
 
-      // Используем локальный бинарник ffmpeg из npm пакета
-      // Масштабируем исходное видео до фиксированного разрешения 640x480
-      const ffmpeg = spawn(ffmpegInstaller.path, [
+      const ffmpegArgs = [
         '-re', // Читать с реальной скоростью
+      ]
+
+      // Если указано время начала, добавляем параметр -ss
+      if (startTime > 0) {
+        ffmpegArgs.push('-ss', startTime.toString())
+      }
+
+      ffmpegArgs.push(
         '-i',
         videoPath,
         '-vf',
-        'scale=640:480', // Масштабирование до фиксированного разрешения
+        'scale=640:480',
         '-f',
         'rawvideo',
         '-pix_fmt',
-        'yuv420p', // Формат пикселей: YUV420p (I420)
+        'yuv420p',
         '-r',
-        '30', // 30 FPS
-        '-', // Вывод в stdout
-      ])
+        '30',
+        '-'
+      )
+
+      const ffmpeg = spawn(ffmpegInstaller.path, ffmpegArgs)
 
       const frameSize = (width * height * 3) / 2 // YUV420p формат: width * height * 1.5
       let frameBuffer = Buffer.alloc(0)
@@ -518,6 +660,12 @@ async function createVideoTrackFromFile(videoPath) {
         while (frameBuffer.length >= frameSize) {
           const frame = frameBuffer.slice(0, frameSize)
           frameBuffer = frameBuffer.slice(frameSize)
+
+          // Проверяем флаг паузы через замыкание
+          if (connection && connection.isPaused) {
+            // Пропускаем кадры во время паузы, но продолжаем читать из буфера
+            continue
+          }
 
           try {
             // Проверяем размер кадра
@@ -531,13 +679,13 @@ async function createVideoTrackFromFile(videoPath) {
             frameCount++
 
             // Логируем первые несколько кадров и затем каждые 100 кадров
-            if (
-              frameCount <= 5 ||
-              frameCount % 200 === 0 ||
-              frameCount === frameSize - 1
-            ) {
-              // console.log(`Processing frame ${frameCount}, track readyState: ${track.readyState}, track enabled: ${track.enabled}`)
-            }
+            // if (
+            //   frameCount <= 5 ||
+            //   frameCount % 200 === 0 ||
+            //   frameCount === frameSize - 1
+            // ) {
+            //   console.log(`Processing frame ${frameCount}, track readyState: ${track.readyState}, track enabled: ${track.enabled}`)
+            // }
 
             // RTCVideoSource.onFrame ожидает данные в формате I420 (YUV420p)
             // Преобразуем Buffer в Uint8ClampedArray
@@ -590,36 +738,19 @@ async function createVideoTrackFromFile(videoPath) {
         // }
       })
 
-      // Разрешаем промис сразу после создания трека, не дожидаясь данных
-      console.log(
-        'Video track created, waiting for FFmpeg to start sending frames...'
-      )
       ffmpeg.stderr.on('data', () => {
         // Игнорируем
       })
 
-      resolve(track)
+      // Разрешаем промис сразу после создания трека, не дожидаясь данных
+      console.log(
+        'Video track created, waiting for FFmpeg to start sending frames...'
+      )
+      resolve({ track, videoSource, ffmpeg })
     } catch (error) {
       reject(error)
     }
   })
-}
-
-function checkMediaSections(sdp) {
-  // Проверяем наличие медиа-секций в SDP
-  const finalSdp = sdp
-
-  if (finalSdp && !finalSdp.includes('m=video')) {
-    console.warn('WARNING: Answer SDP does not contain video media section!')
-    console.warn('Full SDP:', finalSdp)
-  } else {
-    console.log('Answer SDP contains video media section')
-    // Логируем секцию видео
-    const videoSection = finalSdp.match(/m=video[\s\S]*?(?=m=|$)/)
-    if (videoSection) {
-      console.log('Video section:', videoSection[0].substring(0, 300))
-    }
-  }
 }
 
 function transceiverToString(transceiver) {
