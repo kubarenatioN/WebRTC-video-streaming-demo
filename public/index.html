@@ -355,7 +355,7 @@
 
         // Обработка ошибок ICE кандидатов
         peerConnection.onicecandidateerror = (event) => {
-          console.error('ICE candidate error:', event)
+          console.warn('ICE candidate error:', event)
         }
 
         // Обработка изменения состояния соединения

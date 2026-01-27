@@ -823,8 +823,195 @@ async function createVideoTrackFromFile(videoPath, connection, startTime = 0) {
   })
 }
 
+// Функция для создания видео трека из видео файла
+function createVideoTrackFromFFmpeg(
+  videoPath,
+  videoSource,
+  connection,
+  startTime,
+  commonArgs
+) {
+  const width = 640
+  const height = 480
+  const videoFrameSize = (width * height * 3) / 2 // YUV420p формат
+
+  const videoFfmpegArgs = [
+    ...commonArgs,
+    '-i',
+    videoPath,
+    '-vf',
+    'scale=640:480',
+    '-f',
+    'rawvideo',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    '30',
+    '-',
+  ]
+
+  const videoFfmpeg = spawn(ffmpegInstaller.path, videoFfmpegArgs)
+  let videoFrameBuffer = Buffer.alloc(0)
+  let videoFrameCount = 0
+
+  videoFfmpeg.stdout.on('data', (chunk) => {
+    videoFrameBuffer = Buffer.concat([videoFrameBuffer, chunk])
+
+    while (videoFrameBuffer.length >= videoFrameSize) {
+      const frame = videoFrameBuffer.slice(0, videoFrameSize)
+      videoFrameBuffer = videoFrameBuffer.slice(videoFrameSize)
+
+      // Проверяем флаг паузы
+      if (connection && connection.isPaused) {
+        continue
+      }
+
+      try {
+        if (frame.length !== videoFrameSize) {
+          console.warn(
+            `Video frame ${videoFrameCount} size mismatch: expected ${videoFrameSize}, got ${frame.length}. Skipping.`
+          )
+          continue
+        }
+
+        videoFrameCount++
+
+        const yuvData = new Uint8ClampedArray(frame)
+
+        if (yuvData.byteLength !== videoFrameSize) {
+          console.warn(
+            `Video Uint8ClampedArray size mismatch: expected ${videoFrameSize}, got ${yuvData.byteLength}`
+          )
+          continue
+        }
+
+        videoSource.onFrame({
+          width,
+          height,
+          data: yuvData,
+        })
+      } catch (err) {
+        if (videoFrameCount <= 10 || videoFrameCount % 100 === 0) {
+          console.error(
+            `Error processing video frame ${videoFrameCount}:`,
+            err.message
+          )
+        }
+      }
+    }
+  })
+
+  videoFfmpeg.stderr.on('data', () => {})
+
+  return { videoFfmpeg, getFrameCount: () => videoFrameCount }
+}
+
+// Функция для создания аудио трека из видео файла
+function createAudioTrackFromFFmpeg(
+  videoPath,
+  audioSource,
+  connection,
+  startTime,
+  commonArgs
+) {
+  // Для стерео 48kHz: 2 канала * 2 байта (16-bit) = 4 байта на сэмпл
+  // Размер буфера для 10ms аудио: 48000 samples/sec * 0.01 sec * 4 bytes = 1920 bytes
+  // Количество сэмплов для 10ms стерео: 48000 * 0.01 * 2 = 960 сэмплов
+  const audioSampleRate = 48000
+  const audioChannels = 2
+  const audioBytesPerSample = 2 // 16-bit
+  const audioBytesPerFrame =
+    (audioSampleRate * audioBytesPerSample * audioChannels) / 100 // 1920 bytes для 10ms
+  const audioSamplesPerFrame = (audioSampleRate * audioChannels) / 100 // 960 сэмплов
+
+  const audioFfmpegArgs = [
+    ...commonArgs,
+    '-i',
+    videoPath,
+    '-vn', // Без видео
+    '-f',
+    's16le', // PCM signed 16-bit little-endian
+    '-ar',
+    '48000', // Sample rate 48kHz (стандарт WebRTC)
+    '-ac',
+    '2', // Stereo
+    '-',
+  ]
+
+  const audioFfmpeg = spawn(ffmpegInstaller.path, audioFfmpegArgs)
+  let audioBuffer = Buffer.alloc(0)
+  let audioFrameCount = 0
+
+  audioFfmpeg.stdout.on('data', (chunk) => {
+    audioBuffer = Buffer.concat([audioBuffer, chunk])
+
+    // Обрабатываем фреймы по 10ms (1920 bytes для стерео 48kHz)
+    while (audioBuffer.length >= audioBytesPerFrame) {
+      const audioFrame = audioBuffer.slice(0, audioBytesPerFrame)
+      audioBuffer = audioBuffer.slice(audioBytesPerFrame)
+
+      // Проверяем флаг паузы
+      if (connection && connection.isPaused) {
+        continue
+      }
+
+      try {
+        audioFrameCount++
+
+        // КРИТИЧЕСКИ ВАЖНО: Создаем новый ArrayBuffer точно нужного размера
+        // Проблема была в том, что audioFrame.buffer может быть больше чем audioFrame.length
+        // RTCAudioSource.onData требует samples с byteLength точно 1920 байт
+        const samplesArrayBuffer = new ArrayBuffer(audioBytesPerFrame) // 1920 байт
+        const samplesView = new Uint8Array(samplesArrayBuffer)
+        samplesView.set(audioFrame) // Копируем данные в новый буфер
+
+        // Создаем Int16Array из этого ArrayBuffer
+        const samples = new Int16Array(samplesArrayBuffer)
+
+        // Проверяем размер перед передачей
+        if (samples.byteLength !== audioBytesPerFrame) {
+          console.warn(
+            `Audio frame ${audioFrameCount} byteLength mismatch: expected ${audioBytesPerFrame}, got ${samples.byteLength}. Skipping.`
+          )
+          continue
+        }
+
+        if (samples.length !== audioSamplesPerFrame) {
+          console.warn(
+            `Audio frame ${audioFrameCount} samples count mismatch: expected ${audioSamplesPerFrame}, got ${samples.length}. Skipping.`
+          )
+          continue
+        }
+
+        // RTCAudioSource.onData ожидает объект с samples и sampleRate
+        audioSource.onData({
+          samples: samples,
+          sampleRate: audioSampleRate,
+          bitsPerSample: 16,
+          channelCount: audioChannels,
+        })
+      } catch (err) {
+        if (audioFrameCount <= 10 || audioFrameCount % 100 === 0) {
+          console.error(
+            `Error processing audio frame ${audioFrameCount}:`,
+            err.message
+          )
+        }
+      }
+    }
+  })
+
+  audioFfmpeg.stderr.on('data', () => {})
+
+  return { audioFfmpeg, getFrameCount: () => audioFrameCount }
+}
+
 // Функция для создания видео и аудио треков из видео файла
-async function createVideoAndAudioTracksFromFile(videoPath, connection, startTime = 0) {
+async function createVideoAndAudioTracksFromFile(
+  videoPath,
+  connection,
+  startTime = 0
+) {
   return new Promise((resolve, reject) => {
     try {
       // Используем nonstandard API из wrtc для создания треков
@@ -840,10 +1027,6 @@ async function createVideoAndAudioTracksFromFile(videoPath, connection, startTim
         return
       }
 
-      // Фиксированное разрешение для WebRTC стриминга
-      const width = 640
-      const height = 480
-
       // Создаем источники и треки
       const videoSource = new RTCVideoSource()
       const videoTrack = videoSource.createTrack()
@@ -858,158 +1041,28 @@ async function createVideoAndAudioTracksFromFile(videoPath, connection, startTim
         commonArgs.push('-ss', startTime.toString())
       }
 
-      // === FFmpeg процесс для ВИДЕО ===
-      const videoFfmpegArgs = [
-        ...commonArgs,
-        '-i',
+      // Создаем видео и аудио треки
+      const {
+        videoFfmpeg,
+        getFrameCount: getVideoFrameCount,
+      } = createVideoTrackFromFFmpeg(
         videoPath,
-        '-vf',
-        'scale=640:480',
-        '-f',
-        'rawvideo',
-        '-pix_fmt',
-        'yuv420p',
-        '-r',
-        '30',
-        '-',
-      ]
+        videoSource,
+        connection,
+        startTime,
+        commonArgs
+      )
 
-      const videoFfmpeg = spawn(ffmpegInstaller.path, videoFfmpegArgs)
-
-      // === FFmpeg процесс для АУДИО ===
-      const audioFfmpegArgs = [
-        ...commonArgs,
-        '-i',
+      const {
+        audioFfmpeg,
+        getFrameCount: getAudioFrameCount,
+      } = createAudioTrackFromFFmpeg(
         videoPath,
-        '-vn', // Без видео
-        '-f',
-        's16le', // PCM signed 16-bit little-endian
-        '-ar',
-        '48000', // Sample rate 48kHz (стандарт WebRTC)
-        '-ac',
-        '2', // Stereo
-        '-',
-      ]
-
-      const audioFfmpeg = spawn(ffmpegInstaller.path, audioFfmpegArgs)
-
-      // === Обработка ВИДЕО ===
-      const videoFrameSize = (width * height * 3) / 2 // YUV420p формат
-      let videoFrameBuffer = Buffer.alloc(0)
-      let videoFrameCount = 0
-
-      videoFfmpeg.stdout.on('data', (chunk) => {
-        videoFrameBuffer = Buffer.concat([videoFrameBuffer, chunk])
-
-        while (videoFrameBuffer.length >= videoFrameSize) {
-          const frame = videoFrameBuffer.slice(0, videoFrameSize)
-          videoFrameBuffer = videoFrameBuffer.slice(videoFrameSize)
-
-          // Проверяем флаг паузы
-          if (connection && connection.isPaused) {
-            continue
-          }
-
-          try {
-            if (frame.length !== videoFrameSize) {
-              console.warn(
-                `Video frame ${videoFrameCount} size mismatch: expected ${videoFrameSize}, got ${frame.length}. Skipping.`
-              )
-              continue
-            }
-
-            videoFrameCount++
-
-            const yuvData = new Uint8ClampedArray(frame)
-
-            if (yuvData.byteLength !== videoFrameSize) {
-              console.warn(
-                `Video Uint8ClampedArray size mismatch: expected ${videoFrameSize}, got ${yuvData.byteLength}`
-              )
-              continue
-            }
-
-            videoSource.onFrame({
-              width,
-              height,
-              data: yuvData,
-            })
-          } catch (err) {
-            if (videoFrameCount <= 10 || videoFrameCount % 100 === 0) {
-              console.error(
-                `Error processing video frame ${videoFrameCount}:`,
-                err.message
-              )
-            }
-          }
-        }
-      })
-
-      // === Обработка АУДИО ===
-      // Для стерео 48kHz: 2 канала * 2 байта (16-bit) = 4 байта на сэмпл
-      // Размер буфера для 10ms аудио: 48000 samples/sec * 0.01 sec * 4 bytes = 1920 bytes
-      // Количество сэмплов для 10ms стерео: 48000 * 0.01 * 2 = 960 сэмплов
-      const audioSampleRate = 48000
-      const audioChannels = 2
-      const audioBytesPerSample = 2 // 16-bit
-      const audioBytesPerFrame = (audioSampleRate * audioBytesPerSample * audioChannels) / 100 // 10ms фреймы (1920 bytes)
-      const audioSamplesPerFrame = (audioSampleRate * audioChannels) / 100 // 960 сэмплов для 10ms стерео
-
-      let audioBuffer = Buffer.alloc(0)
-      let audioFrameCount = 0
-
-      audioFfmpeg.stdout.on('data', (chunk) => {
-        audioBuffer = Buffer.concat([audioBuffer, chunk])
-
-        // Обрабатываем фреймы по 10ms (1920 bytes для стерео 48kHz)
-        while (audioBuffer.length >= audioBytesPerFrame) {
-          const audioFrame = audioBuffer.slice(0, audioBytesPerFrame)
-          audioBuffer = audioBuffer.slice(audioBytesPerFrame)
-
-          // Проверяем флаг паузы
-          if (connection && connection.isPaused) {
-            continue
-          }
-
-          try {
-            audioFrameCount++
-
-            // ВАЖНО: Создаем новый ArrayBuffer правильного размера
-            // audioFrame.buffer может быть больше чем audioFrame.length
-            const samplesBuffer = Buffer.from(audioFrame) // Копируем данные в новый буфер
-            const samples = new Int16Array(
-              samplesBuffer.buffer,
-              samplesBuffer.byteOffset,
-              samplesBuffer.length / 2 // Количество 16-bit сэмплов
-            )
-
-            // Проверяем размер samples перед передачей
-            if (samples.length !== audioSamplesPerFrame) {
-              console.warn(
-                `Audio frame ${audioFrameCount} samples count mismatch: expected ${audioSamplesPerFrame}, got ${samples.length}. Skipping.`
-              )
-              continue
-            }
-
-            // RTCAudioSource.onData ожидает объект с samples и sampleRate
-            audioSource.onData({
-              samples: samples,
-              sampleRate: audioSampleRate,
-              bitsPerSample: 16,
-              channelCount: audioChannels,
-            })
-          } catch (err) {
-            if (audioFrameCount <= 10 || audioFrameCount % 100 === 0) {
-              console.error(
-                `Error processing audio frame ${audioFrameCount}:`,
-                err.message
-              )
-            }
-          }
-        }
-      })
-
-      // ------
+        audioSource,
+        connection,
+        startTime,
+        commonArgs
+      )
 
       // === Обработка ошибок ===
       let hasError = false
@@ -1030,7 +1083,7 @@ async function createVideoAndAudioTracksFromFile(videoPath, connection, startTim
       const checkComplete = () => {
         if (videoClosed && audioClosed) {
           console.log(
-            `Both FFmpeg processes closed. Video frames: ${videoFrameCount}, Audio frames: ${audioFrameCount}`
+            `Both FFmpeg processes closed. Video frames: ${getVideoFrameCount()}, Audio frames: ${getAudioFrameCount()}`
           )
         }
       }
@@ -1038,10 +1091,13 @@ async function createVideoAndAudioTracksFromFile(videoPath, connection, startTim
       videoFfmpeg.on('close', (code) => {
         videoClosed = true
         console.log(
-          `Video FFmpeg process exited with code ${code}, total frames: ${videoFrameCount}`
+          `Video FFmpeg process exited with code ${code}, total frames: ${getVideoFrameCount()}`
         )
         if (code !== 0 && code !== null && !hasError) {
-          errorHandler(new Error(`Video FFmpeg exited with code ${code}`), 'video')
+          errorHandler(
+            new Error(`Video FFmpeg exited with code ${code}`),
+            'video'
+          )
         }
         checkComplete()
       })
@@ -1049,17 +1105,16 @@ async function createVideoAndAudioTracksFromFile(videoPath, connection, startTim
       audioFfmpeg.on('close', (code) => {
         audioClosed = true
         console.log(
-          `Audio FFmpeg process exited with code ${code}, total frames: ${audioFrameCount}`
+          `Audio FFmpeg process exited with code ${code}, total frames: ${getAudioFrameCount()}`
         )
         if (code !== 0 && code !== null && !hasError) {
-          errorHandler(new Error(`Audio FFmpeg exited with code ${code}`), 'audio')
+          errorHandler(
+            new Error(`Audio FFmpeg exited with code ${code}`),
+            'audio'
+          )
         }
         checkComplete()
       })
-
-      // Игнорируем stderr (FFmpeg выводит туда информацию о прогрессе)
-      videoFfmpeg.stderr.on('data', () => { })
-      audioFfmpeg.stderr.on('data', () => { })
 
       // Разрешаем промис сразу после создания треков
       console.log(
