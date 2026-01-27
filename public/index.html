@@ -184,7 +184,7 @@
   </head>
   <body>
     <div class="container">
-      <div class="header">
+        <div class="header">
         <h1>🎥 WebRTC Video Streaming</h1>
         <p>Стриминг видео через WebRTC</p>
       </div>
@@ -230,6 +230,8 @@
       }
 
       const remoteVideo = document.getElementById('remoteVideo')
+      // remoteVideo.volume = 0.2
+
       const connectBtn = document.getElementById('connectBtn')
       const disconnectBtn = document.getElementById('disconnectBtn')
       const statusDiv = document.getElementById('status')
@@ -240,6 +242,7 @@
       let currentVideoFile = null
       let pollingInterval = null
       let iceCandidatePollingInterval = null
+      let mediaStream = null
 
       // Конфигурация ICE серверов
       const ICE_SERVERS = [
@@ -331,53 +334,8 @@
         peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS })
         connectionId = Date.now().toString()
 
-        // Добавляем transceiver для получения видео от сервера
-        // Это указывает серверу, что клиент хочет получать видео
-        const transceiver = peerConnection.addTransceiver('video', {
-          direction: 'recvonly', // Клиент хочет только получать видео
-        })
-        console.log(
-          'Added video transceiver (recvonly) to receive video from server',
-          transceiver
-        )
-
         // Обработка получения видеопотока
-        peerConnection.ontrack = (event) => {
-          console.log('ontrack event received:', event)
-
-          // Проверяем, что есть поток или трек
-          if (event.streams && event.streams.length > 0) {
-            console.log(
-              'Setting video srcObject from stream:',
-              event.streams[0]
-            )
-            remoteVideo.srcObject = event.streams[0]
-            updateStatus('connected', 'Подключено')
-          } else if (event.track) {
-            // Если потока нет, создаем новый MediaStream из трека
-            console.log('Creating new MediaStream from track')
-            const stream = new MediaStream([event.track])
-            remoteVideo.srcObject = stream
-            console.log('Video srcObject set from track')
-            try {
-              remoteVideo?.play()
-              console.log('Video play() call');
-            } catch (error) {
-              console.warn('Video play error:', error);
-            }
-
-            updateStatus('connected', 'Подключено')
-          } else {
-            console.warn('ontrack event has no track or streams!')
-          }
-
-          // Обработка изменения состояния трека
-          if (event.track) {
-            event.track.onended = () => {
-              console.log('Video track ended', event.track)
-            }
-          }
-        }
+        peerConnection.ontrack = (event) => _onTrackHandler(event);
 
         // Обработка ICE кандидатов от клиента
         peerConnection.onicecandidate = async (event) => {
@@ -397,7 +355,7 @@
 
         // Обработка ошибок ICE кандидатов
         peerConnection.onicecandidateerror = (event) => {
-          console.error('ICE candidate error:', event)
+          console.warn('ICE candidate error:', event)
         }
 
         // Обработка изменения состояния соединения
@@ -408,12 +366,10 @@
             updateStatus('connected', 'Подключено')
             stopPolling()
 
-            await startVideoStream(currentVideoFile)
-
             // Проверяем, есть ли уже треки после подключения
             const receivers = peerConnection.getReceivers()
+            
             console.log(`Receivers count after connection: ${receivers.length}`)
-
             receivers.forEach((receiver, i) => {
               const track = receiver.track
               console.log(
@@ -439,6 +395,20 @@
       // Создание offer и отправка через HTTP
       async function createOffer() {
         try {
+          // Добавляем transceiver для получения видео от сервера
+          // Это указывает серверу, что клиент хочет получать видео
+          const transceiver = peerConnection.addTransceiver('video', {
+            direction: 'recvonly', // Клиент хочет только получать видео
+          })
+          const audioTransceiver = peerConnection.addTransceiver('audio', {
+            direction: 'recvonly',
+          })
+
+          console.log(
+            'Added transceivers recvonly',
+            transceiver, audioTransceiver
+          )
+          
           const offer = await peerConnection.createOffer()
 
           // Проверяем, что offer содержит медиа-секции
@@ -505,6 +475,55 @@
         } catch (error) {
           console.error('Error starting video stream:', error)
         }
+      }
+
+      function _onTrackHandler(event) {
+        console.log('ontrack handler:')
+
+        // Проверяем, что есть поток или трек
+        if (event.streams && event.streams.length > 0) {
+          console.log(
+            'Setting video srcObject from stream:',
+            event.streams[0]
+          )
+          remoteVideo.srcObject = event.streams[0]
+          updateStatus('connected', 'Подключено')
+          return;
+        } 
+        
+        const track = event.track;
+        if (track) {
+          // Если потока нет, создаем новый MediaStream из трека
+          console.log('Creating new MediaStream from track', track)
+          
+          const _stream = mediaStream ? mediaStream : new MediaStream([]);
+          if (!mediaStream) {
+            mediaStream = _stream;
+          }
+          if (!remoteVideo.srcObject) {
+            remoteVideo.srcObject = mediaStream;
+          }
+
+          if (track.kind === 'video') {
+            _stream.addTrack(track)
+          } else if (track.kind === 'audio') {
+            _stream.addTrack(track)
+          }
+          
+          console.log('stream:', _stream.getTracks());
+
+          try {
+            remoteVideo?.play()
+            console.log('Video play() call');
+          } catch (error) {
+            console.warn('Video play error:', error);
+          }
+
+          updateStatus('connected', 'Подключено')
+          return;
+        }
+
+        console.warn('ontrack event has no track or streams!')
       }
 
       // Polling для получения ICE кандидатов от сервера

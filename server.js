@@ -65,7 +65,7 @@ app.use('/videos', express.static(VIDEOS_DIR))
 // POST /api/offer - отправка offer от клиента
 app.post('/api/offer', async (req, res) => {
   try {
-    const { offer, connectionId } = req.body
+    const { offer, connectionId, videoFile } = req.body
 
     if (!offer) {
       return res.status(400).json({ error: 'Offer is required' })
@@ -136,9 +136,73 @@ app.post('/api/offer', async (req, res) => {
     // Устанавливаем offer от клиента ПЕРВЫМ
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
 
+    // НОВОЕ: Если videoFile передан, создаем трек ДО создания answer
+    let videoTrack = null
+    let audioTrack = null
+    let videoSource = null
+    let ffmpeg = null
+
+    if (videoFile) {
+      try {
+        const videoPath = join(VIDEOS_DIR, videoFile)
+
+        // Проверяем существование файла
+        statSync(videoPath)
+
+        console.log(`Creating video track for ${videoFile} before answer creation`)
+
+        // Создаем видеотрек
+        const trackData = 
+          await createVideoAndAudioTracksFromFile(videoPath, { isPaused: false }, 0)
+        videoTrack = trackData.videoTrack
+
+        videoSource = trackData.videoSource
+        ffmpeg = trackData.videoFfmpeg
+
+        audioTrack = trackData.audioTrack
+
+        // Находим transceiver от клиента (recvonly)
+        const transceivers = peerConnection.getTransceivers()
+        const videoTransceiver = transceivers.find(
+          (t) => t.receiver?.track?.kind === 'video' || t.receiver?.track === null
+        )
+        const audioTransceiver = transceivers.find(
+          (t) => t.receiver?.track?.kind === 'audio' || t.receiver?.track === null
+        )
+
+        if (videoTransceiver) {
+          // Меняем направление на sendonly и добавляем трек
+          videoTransceiver.direction = 'sendonly'
+
+          if (videoTransceiver.sender) {
+            await videoTransceiver.sender.replaceTrack(videoTrack)
+          } else {
+            // Если sender нет, добавляем трек напрямую
+            peerConnection.addTrack(videoTrack)
+          }
+
+          console.log('Video track added to transceiver before answer creation')
+        }
+        if (audioTransceiver) {
+          console.log(111, 'audioTransceiver:', audioTransceiver.direction);
+
+          audioTransceiver.direction = 'sendonly'
+
+          if (audioTransceiver.sender) {
+            await audioTransceiver.sender.replaceTrack(audioTrack)
+          } else {
+            // Если sender нет, добавляем трек напрямую
+            peerConnection.addTrack(audioTrack)
+          }
+        }
+      } catch (error) {
+        console.error('Error creating tracks in offer:', error)
+      }
+    }
+
     const answer = await peerConnection.createAnswer()
     await peerConnection.setLocalDescription(answer)
-    console.log('set local SDP on OFFER')
+    console.log('set local SDP on -- OFFER --')
     console.log(
       'Remote description set, signaling state:',
       peerConnection.signalingState
@@ -151,6 +215,12 @@ app.post('/api/offer', async (req, res) => {
       negotiationNeeded: false,
       serverIceCandidates,
       clientIceCandidatesProcessed: 0,
+      videoTrack,      // Сохраняем трек
+      videoSource,     // Сохраняем source
+      ffmpeg,          // Сохраняем ffmpeg процесс
+      videoFile: videoFile || null,
+      videoPath: videoFile ? join(VIDEOS_DIR, videoFile) : null,
+      isPaused: false,
     })
 
     res.json({
@@ -296,7 +366,7 @@ app.post('/api/connection/:id/stream/start', async (req, res) => {
     console.log('POST stream/start')
 
     try {
-      const { negotiationNeeded: _negotiationNeeded } = await startStream(
+      const { negotiationNeeded: _negotiationNeeded, videoTrack } = await startStream(
         id,
         videoFile
       )
@@ -510,7 +580,7 @@ async function startStream(conId, videoFile) {
   connection.ffmpeg = ffmpeg
   connection.isPaused = false
 
-  return { negotiationNeeded: true }
+  return { negotiationNeeded: true, videoTrack }
 }
 
 async function pauseStream(conId, currentTime) {
@@ -611,10 +681,10 @@ async function createVideoTrackFromFile(videoPath, connection, startTime = 0) {
   return new Promise((resolve, reject) => {
     try {
       // Используем nonstandard API из wrtc для создания видеотрека
-      const { RTCVideoSource } = nonstandard
+      const { RTCVideoSource, RTCAudioSource } = nonstandard;
 
       if (!RTCVideoSource) {
-        reject(new Error('RTCVideoSource not available in this wrtc version'))
+        reject(new Error("RTCVideoSource not available in this wrtc version"))
         return
       }
 
@@ -747,6 +817,321 @@ async function createVideoTrackFromFile(videoPath, connection, startTime = 0) {
         'Video track created, waiting for FFmpeg to start sending frames...'
       )
       resolve({ track, videoSource, ffmpeg })
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+
+// Функция для создания видео трека из видео файла
+function createVideoTrackFromFFmpeg(
+  videoPath,
+  videoSource,
+  connection,
+  startTime,
+  commonArgs
+) {
+  const width = 640
+  const height = 480
+  const videoFrameSize = (width * height * 3) / 2 // YUV420p формат
+
+  const videoFfmpegArgs = [
+    ...commonArgs,
+    '-i',
+    videoPath,
+    '-vf',
+    'scale=640:480',
+    '-f',
+    'rawvideo',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    '30',
+    '-',
+  ]
+
+  const videoFfmpeg = spawn(ffmpegInstaller.path, videoFfmpegArgs)
+  let videoFrameBuffer = Buffer.alloc(0)
+  let videoFrameCount = 0
+
+  videoFfmpeg.stdout.on('data', (chunk) => {
+    videoFrameBuffer = Buffer.concat([videoFrameBuffer, chunk])
+
+    while (videoFrameBuffer.length >= videoFrameSize) {
+      const frame = videoFrameBuffer.slice(0, videoFrameSize)
+      videoFrameBuffer = videoFrameBuffer.slice(videoFrameSize)
+
+      // Проверяем флаг паузы
+      if (connection && connection.isPaused) {
+        continue
+      }
+
+      try {
+        if (frame.length !== videoFrameSize) {
+          console.warn(
+            `Video frame ${videoFrameCount} size mismatch: expected ${videoFrameSize}, got ${frame.length}. Skipping.`
+          )
+          continue
+        }
+
+        videoFrameCount++
+
+        const yuvData = new Uint8ClampedArray(frame)
+
+        if (yuvData.byteLength !== videoFrameSize) {
+          console.warn(
+            `Video Uint8ClampedArray size mismatch: expected ${videoFrameSize}, got ${yuvData.byteLength}`
+          )
+          continue
+        }
+
+        videoSource.onFrame({
+          width,
+          height,
+          data: yuvData,
+        })
+      } catch (err) {
+        if (videoFrameCount <= 10 || videoFrameCount % 100 === 0) {
+          console.error(
+            `Error processing video frame ${videoFrameCount}:`,
+            err.message
+          )
+        }
+      }
+    }
+  })
+
+  videoFfmpeg.stderr.on('data', () => {})
+
+  return { videoFfmpeg, getFrameCount: () => videoFrameCount }
+}
+
+// Функция для создания аудио трека из видео файла
+function createAudioTrackFromFFmpeg(
+  videoPath,
+  audioSource,
+  connection,
+  startTime,
+  commonArgs
+) {
+  // Для стерео 48kHz: 2 канала * 2 байта (16-bit) = 4 байта на сэмпл
+  // Размер буфера для 10ms аудио: 48000 samples/sec * 0.01 sec * 4 bytes = 1920 bytes
+  // Количество сэмплов для 10ms стерео: 48000 * 0.01 * 2 = 960 сэмплов
+  const audioSampleRate = 48000
+  const audioChannels = 2
+  const audioBytesPerSample = 2 // 16-bit
+  const audioBytesPerFrame =
+    (audioSampleRate * audioBytesPerSample * audioChannels) / 100 // 1920 bytes для 10ms
+  const audioSamplesPerFrame = (audioSampleRate * audioChannels) / 100 // 960 сэмплов
+
+  const audioFfmpegArgs = [
+    ...commonArgs,
+    '-i',
+    videoPath,
+    '-vn', // Без видео
+    '-f',
+    's16le', // PCM signed 16-bit little-endian
+    '-ar',
+    '48000', // Sample rate 48kHz (стандарт WebRTC)
+    '-ac',
+    '2', // Stereo
+    '-',
+  ]
+
+  const audioFfmpeg = spawn(ffmpegInstaller.path, audioFfmpegArgs)
+  let audioBuffer = Buffer.alloc(0)
+  let audioFrameCount = 0
+
+  audioFfmpeg.stdout.on('data', (chunk) => {
+    audioBuffer = Buffer.concat([audioBuffer, chunk])
+
+    // Обрабатываем фреймы по 10ms (1920 bytes для стерео 48kHz)
+    while (audioBuffer.length >= audioBytesPerFrame) {
+      const audioFrame = audioBuffer.slice(0, audioBytesPerFrame)
+      audioBuffer = audioBuffer.slice(audioBytesPerFrame)
+
+      // Проверяем флаг паузы
+      if (connection && connection.isPaused) {
+        continue
+      }
+
+      try {
+        audioFrameCount++
+
+        // КРИТИЧЕСКИ ВАЖНО: Создаем новый ArrayBuffer точно нужного размера
+        // Проблема была в том, что audioFrame.buffer может быть больше чем audioFrame.length
+        // RTCAudioSource.onData требует samples с byteLength точно 1920 байт
+        const samplesArrayBuffer = new ArrayBuffer(audioBytesPerFrame) // 1920 байт
+        const samplesView = new Uint8Array(samplesArrayBuffer)
+        samplesView.set(audioFrame) // Копируем данные в новый буфер
+
+        // Создаем Int16Array из этого ArrayBuffer
+        const samples = new Int16Array(samplesArrayBuffer)
+
+        // Проверяем размер перед передачей
+        if (samples.byteLength !== audioBytesPerFrame) {
+          console.warn(
+            `Audio frame ${audioFrameCount} byteLength mismatch: expected ${audioBytesPerFrame}, got ${samples.byteLength}. Skipping.`
+          )
+          continue
+        }
+
+        if (samples.length !== audioSamplesPerFrame) {
+          console.warn(
+            `Audio frame ${audioFrameCount} samples count mismatch: expected ${audioSamplesPerFrame}, got ${samples.length}. Skipping.`
+          )
+          continue
+        }
+
+        // RTCAudioSource.onData ожидает объект с samples и sampleRate
+        audioSource.onData({
+          samples: samples,
+          sampleRate: audioSampleRate,
+          bitsPerSample: 16,
+          channelCount: audioChannels,
+        })
+      } catch (err) {
+        if (audioFrameCount <= 10 || audioFrameCount % 100 === 0) {
+          console.error(
+            `Error processing audio frame ${audioFrameCount}:`,
+            err.message
+          )
+        }
+      }
+    }
+  })
+
+  audioFfmpeg.stderr.on('data', () => {})
+
+  return { audioFfmpeg, getFrameCount: () => audioFrameCount }
+}
+
+// Функция для создания видео и аудио треков из видео файла
+async function createVideoAndAudioTracksFromFile(
+  videoPath,
+  connection,
+  startTime = 0
+) {
+  return new Promise((resolve, reject) => {
+    try {
+      // Используем nonstandard API из wrtc для создания треков
+      const { RTCVideoSource, RTCAudioSource } = nonstandard
+
+      if (!RTCVideoSource) {
+        reject(new Error('RTCVideoSource not available in this wrtc version'))
+        return
+      }
+
+      if (!RTCAudioSource) {
+        reject(new Error('RTCAudioSource not available in this wrtc version'))
+        return
+      }
+
+      // Создаем источники и треки
+      const videoSource = new RTCVideoSource()
+      const videoTrack = videoSource.createTrack()
+
+      const audioSource = new RTCAudioSource()
+      const audioTrack = audioSource.createTrack()
+
+      // Общие параметры для обоих процессов
+      const commonArgs = ['-re'] // Читать с реальной скоростью
+
+      if (startTime > 0) {
+        commonArgs.push('-ss', startTime.toString())
+      }
+
+      // Создаем видео и аудио треки
+      const {
+        videoFfmpeg,
+        getFrameCount: getVideoFrameCount,
+      } = createVideoTrackFromFFmpeg(
+        videoPath,
+        videoSource,
+        connection,
+        startTime,
+        commonArgs
+      )
+
+      const {
+        audioFfmpeg,
+        getFrameCount: getAudioFrameCount,
+      } = createAudioTrackFromFFmpeg(
+        videoPath,
+        audioSource,
+        connection,
+        startTime,
+        commonArgs
+      )
+
+      // === Обработка ошибок ===
+      let hasError = false
+      const errorHandler = (error, type) => {
+        if (hasError) return
+        hasError = true
+        console.error(`FFmpeg ${type} error:`, error)
+        reject(error)
+      }
+
+      videoFfmpeg.on('error', (error) => errorHandler(error, 'video'))
+      audioFfmpeg.on('error', (error) => errorHandler(error, 'audio'))
+
+      // === Обработка закрытия процессов ===
+      let videoClosed = false
+      let audioClosed = false
+
+      const checkComplete = () => {
+        if (videoClosed && audioClosed) {
+          console.log(
+            `Both FFmpeg processes closed. Video frames: ${getVideoFrameCount()}, Audio frames: ${getAudioFrameCount()}`
+          )
+        }
+      }
+
+      videoFfmpeg.on('close', (code) => {
+        videoClosed = true
+        console.log(
+          `Video FFmpeg process exited with code ${code}, total frames: ${getVideoFrameCount()}`
+        )
+        if (code !== 0 && code !== null && !hasError) {
+          errorHandler(
+            new Error(`Video FFmpeg exited with code ${code}`),
+            'video'
+          )
+        }
+        checkComplete()
+      })
+
+      audioFfmpeg.on('close', (code) => {
+        audioClosed = true
+        console.log(
+          `Audio FFmpeg process exited with code ${code}, total frames: ${getAudioFrameCount()}`
+        )
+        if (code !== 0 && code !== null && !hasError) {
+          errorHandler(
+            new Error(`Audio FFmpeg exited with code ${code}`),
+            'audio'
+          )
+        }
+        checkComplete()
+      })
+
+      // Разрешаем промис сразу после создания треков
+      console.log(
+        'Video and audio tracks created, waiting for FFmpeg to start sending data...'
+      )
+
+      resolve({
+        videoTrack,
+        audioTrack,
+        videoSource,
+        audioSource,
+        videoFfmpeg,
+        audioFfmpeg,
+        // Для обратной совместимости, если где-то используется старый формат
+        track: videoTrack,
+        ffmpeg: videoFfmpeg, // Основной процесс (видео)
+      })
     } catch (error) {
       reject(error)
     }
